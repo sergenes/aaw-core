@@ -39,6 +39,7 @@ import asyncio
 import json
 import sys
 import time
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -98,6 +99,7 @@ class Conn:
     token: str
     role: str
     computer_id: str
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)  # one token may hold several sockets
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def send(self, frame: dict) -> None:
@@ -115,7 +117,7 @@ class Relay:
         self.push: PushSender = push or NullPushSender()
         self.db: aiosqlite.Connection | None = None
         self.write_lock = asyncio.Lock()
-        self.live: dict[str, dict[str, Conn]] = {}  # computer_id -> token -> Conn
+        self.live: dict[str, dict[str, Conn]] = {}  # computer_id -> connection id -> Conn
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
@@ -176,7 +178,7 @@ class Relay:
             conn = await self._hello(ws, hello)
             if conn is None:
                 return
-            self.live.setdefault(conn.computer_id, {})[conn.token] = conn
+            self.live.setdefault(conn.computer_id, {})[conn.id] = conn
             await conn.send({"type": "welcome", "computer_id": conn.computer_id})
             if conn.role == "computer":
                 await self._cleanup()
@@ -190,7 +192,7 @@ class Relay:
             await self._error(ws, f"bad frame: {e}")
         finally:
             if conn is not None:
-                self.live.get(conn.computer_id, {}).pop(conn.token, None)
+                self.live.get(conn.computer_id, {}).pop(conn.id, None)
                 await self._exec("UPDATE devices SET last_seen=? WHERE token=?", (_now_s(), conn.token))
 
     async def _error(self, ws: WebSocket, message: str) -> None:
@@ -332,7 +334,7 @@ class Relay:
             (doc["id"], conn.computer_id, project_id, int(doc.get("ts", 0)), json.dumps(doc),
              1 if doc.get("consumed") else 0, _now_s() + COMMAND_TTL_DAYS * 86400))
         await self._forward(conn.computer_id, {"type": "command", "project_id": project_id, "command": doc},
-                            exclude=conn.token)
+                            exclude=conn.id)
 
     async def _on_command_update(self, conn: Conn, frame: dict) -> None:
         project_id, command_id, fields = frame["project_id"], frame["command_id"], frame.get("fields") or {}
@@ -345,13 +347,13 @@ class Relay:
         await self._exec("UPDATE commands SET doc=?, consumed=? WHERE id=?",
                          (json.dumps(doc), 1 if doc.get("consumed") else 0, command_id))
         await self._forward(conn.computer_id, {"type": "command_update", "project_id": project_id,
-                                               "command_id": command_id, "fields": fields}, exclude=conn.token)
+                                               "command_id": command_id, "fields": fields}, exclude=conn.id)
 
     async def _on_command_delete(self, conn: Conn, frame: dict) -> None:
         project_id, command_id = frame["project_id"], frame["command_id"]
         await self._exec("DELETE FROM commands WHERE id=? AND computer_id=?", (command_id, conn.computer_id))
         await self._forward(conn.computer_id, {"type": "command_delete", "project_id": project_id,
-                                               "command_id": command_id}, exclude=conn.token)
+                                               "command_id": command_id}, exclude=conn.id)
 
     async def _on_subscribe(self, conn: Conn, frame: dict) -> None:
         if conn.role != "phone":

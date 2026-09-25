@@ -204,6 +204,29 @@ def test_healthz(relay):
     assert relay.get("/healthz").json() == {"ok": True}
 
 
+def test_several_sockets_may_share_one_computer_token(relay):
+    """A hook is a short-lived process that opens its own socket with the daemon's token.
+    Both must stay routed: a phone command reaches every live socket of that computer,
+    and closing the hook's socket must not evict the daemon's."""
+    cmd = make_command("from the phone", KEY)
+    with relay.websocket_connect("/v1/ws") as daemon:
+        hello_computer(daemon)
+        register_phone(daemon, "ptok")
+        with relay.websocket_connect("/v1/ws") as hook:
+            assert hello_computer(hook)["type"] == "welcome"  # same token, second socket
+            with relay.websocket_connect("/v1/ws") as phone:
+                hello_phone(phone, "ptok")
+                phone.send_json({"type": "command", "project_id": "p", "command": cmd})
+                assert daemon.receive_json()["command"]["id"] == cmd["id"]
+                assert hook.receive_json()["command"]["id"] == cmd["id"]
+        # the hook is gone; the daemon is still the computer's live socket
+        with relay.websocket_connect("/v1/ws") as phone:
+            hello_phone(phone, "ptok")
+            cmd2 = make_command("again", KEY)
+            phone.send_json({"type": "command", "project_id": "p", "command": cmd2})
+            assert daemon.receive_json()["command"]["id"] == cmd2["id"]
+
+
 # ── integration: RelayTransport <-> uvicorn ─────────────────────────────────
 
 
