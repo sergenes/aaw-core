@@ -14,7 +14,7 @@ from starlette.testclient import TestClient
 from websockets.sync.client import connect as ws_connect
 
 from aaw_core.encryption import decrypt, generate_key_b64, is_encrypted
-from aaw_core.relay.server import create_app
+from aaw_core.relay.server import StalePushToken, create_app
 from aaw_core.transport.base import make_command
 from aaw_core.transport.relay import RelayTransport, new_token
 
@@ -412,3 +412,44 @@ def test_transport_serves_requests_and_lists_projects(live_relay, tmp_path):
         phone.close()
     finally:
         rt.stop()
+
+
+def test_auto_approve_skips_permission_pushes_but_not_choices(relay):
+    with relay.websocket_connect("/v1/ws") as comp:
+        hello_computer(comp)
+        register_phone(comp)
+        with relay.websocket_connect("/v1/ws") as phone:
+            hello_phone(phone, "ptok", platform="ios", push_token="apns-1")
+        comp.send_json({"type": "state", "project_id": "p", "fields": {"auto_approve": True}})
+        comp.send_json({"type": "event", "project_id": "p", "event": {
+            "id": "q1", "type": "question", "ts": 1, "payload": {"question": "x", "kind": "permission"}}})
+        comp.send_json({"type": "event", "project_id": "p", "event": {
+            "id": "q2", "type": "question", "ts": 2, "payload": {"question": "x", "kind": "choice"}}})
+        comp.send_json({"type": "event", "project_id": "p", "event": {
+            "id": "n1", "type": "notification", "ts": 3, "payload": {"message": "x", "level": "error"}}})
+        comp.send_json({"type": "ping"})
+        assert comp.receive_json() == {"type": "pong"}
+    assert [c["event"]["id"] for c in relay.push.calls] == ["q2", "n1"]
+
+
+def test_a_stale_push_token_is_forgotten(tmp_path):
+    class StalePush:
+        def __init__(self):
+            self.calls = 0
+
+        async def notify(self, **kwargs):
+            self.calls += 1
+            raise StalePushToken(kwargs["push_token"])
+
+    push = StalePush()
+    with TestClient(create_app(str(tmp_path / "r.sqlite"), push=push)) as client, \
+         client.websocket_connect("/v1/ws") as comp:
+        hello_computer(comp)
+        register_phone(comp)
+        with client.websocket_connect("/v1/ws") as phone:
+            hello_phone(phone, "ptok", platform="ios", push_token="apns-old")
+        comp.send_json({"type": "event", "project_id": "p", "event": event("e1")})
+        comp.send_json({"type": "event", "project_id": "p", "event": event("e2")})
+        comp.send_json({"type": "ping"})
+        assert comp.receive_json() == {"type": "pong"}
+    assert push.calls == 1  # the second event found no token left to push to

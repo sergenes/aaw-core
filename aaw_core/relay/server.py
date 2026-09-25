@@ -92,9 +92,18 @@ CREATE TABLE IF NOT EXISTS computers (computer_id TEXT PRIMARY KEY, doc TEXT NOT
 """
 
 
+class StalePushToken(Exception):
+    """The push service no longer knows this token; the relay forgets it."""
+
+    def __init__(self, push_token: str):
+        super().__init__(push_token)
+        self.push_token = push_token
+
+
 class PushSender(Protocol):
     """Wake a phone whose app is closed. Content-free: the relay hands over only an
-    already-encrypted preview and routing ids."""
+    already-encrypted preview and routing ids. Raises ``StalePushToken`` for a token
+    the push service rejects for good; ``aaw_core.relay.push_fcm`` is the FCM one."""
 
     async def notify(self, *, push_token: str, platform: str, computer_id: str, project_id: str,
                      event: dict) -> None: ...
@@ -305,6 +314,15 @@ class Relay:
             await self._push(conn.computer_id, project_id, event)
 
     async def _push(self, computer_id: str, project_id: str, event: dict) -> None:
+        # A permission question under auto_approve is answered on the computer within a
+        # second; waking the phone for it would only ring for nothing. A "choice" question
+        # (custom options) always needs a person, so it pushes regardless.
+        payload = event.get("payload") or {}
+        if event.get("type") == "question" and (payload.get("kind") or "permission") != "choice":
+            row = await self._fetchone("SELECT doc FROM projects WHERE computer_id=? AND project_id=?",
+                                       (computer_id, project_id))
+            if row is not None and json.loads(row["doc"]).get("auto_approve") is True:
+                return
         rows = await self._fetchall(
             "SELECT push_token, platform FROM devices WHERE computer_id=? AND role='phone' AND push_token<>''",
             (computer_id,))
@@ -312,6 +330,9 @@ class Relay:
             try:
                 await self.push.notify(push_token=r["push_token"], platform=r["platform"],
                                        computer_id=computer_id, project_id=project_id, event=event)
+            except StalePushToken as stale:
+                await self._exec("UPDATE devices SET push_token='' WHERE push_token=?", (stale.push_token,))
+                print("[relay] push token no longer registered; forgotten", file=sys.stderr, flush=True)
             except Exception as e:  # noqa: BLE001 - a push failure must never break routing
                 print(f"[relay] push failed: {e}", file=sys.stderr, flush=True)
 

@@ -108,3 +108,16 @@ The phone's `request` frames the supervisor answers (`response {req, kind, paylo
 | `fs_fetch` | `path_enc` | `mime`, `size`, `total_chunks`, `chunks[<encrypted base64>]`, `error` |
 
 When no computer socket is live the relay itself answers `{"error": "offline"}`.
+
+## 8. Push
+
+When an event arrives and no phone socket is live, the relay hands the event to its `PushSender`.
+The hosted relay uses `aaw_core/relay/push_fcm.py` (FCM HTTP v1, a service account given as configuration), which sends the same message the hosted product's Cloud Function sends today, so the apps and the iOS Notification Service Extension need no change:
+
+- pushed: every `question`; a `notification` at `success`, `warning`, or `error`; nothing else.
+  A permission question is not pushed while the project has `auto_approve` (a `choice` question always is).
+- data: `computer_id`, `project_id`, `event_id`, `type`, `kind` (`permission` | `choice`), `agent`, `encrypted_body` (the encrypted question or message, or `""` when it would exceed FCM's payload cap; never truncated).
+  There is no `uid`: a relay computer has none.
+- iOS: a `notification` block with a generic title and body, `apns.payload.aps` with `sound`, `mutable-content: 1`, and `category: PERMISSION_PROMPT` for permission questions.
+- Android: data only (`title` inside `data`), `android.priority: high`.
+- A token FCM reports as unregistered is forgotten by the relay.
