@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 
@@ -398,6 +399,19 @@ def has_claude_history(project_dir: Path) -> bool:
     encoded = re.sub(r"[^a-zA-Z0-9]", "-", str(project_dir))
     hist = Path.home() / ".claude" / "projects" / encoded
     return hist.is_dir() and any(hist.glob("*.jsonl"))
+
+
+def has_scoot_history(project_dir: Path) -> bool:
+    """Whether scoot has a saved session for this workspace root (so --continue resumes it).
+    scoot keeps one JSON per session under ~/.local/state/scoot/sessions (SCOOT_STATE_DIR overrides)."""
+    state = Path(os.environ.get("SCOOT_STATE_DIR") or Path.home() / ".local/state/scoot")
+    for f in (state / "sessions").glob("*.json"):
+        try:
+            if json.loads(f.read_text()).get("root") == str(project_dir):
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
 
 
 def dialog_is_open(pane: str, agent: str) -> bool:

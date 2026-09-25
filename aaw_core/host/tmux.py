@@ -1,7 +1,7 @@
 """tmux plumbing: every tmux call the host makes goes through here.
 
-Session targets are exact-matched ("=name:"): tmux resolves "-t cb-ideas" by prefix
-when no session has that exact name, so with "cb-ideas" stopped and "cb-ideas-claude"
+Session targets are exact-matched ("=name:"): tmux resolves "-t aaw-ideas" by prefix
+when no session has that exact name, so with "aaw-ideas" stopped and "aaw-ideas-claude"
 alive, every command aimed at the primary silently hit the parallel session. The
 colon makes the target valid for pane and window commands too.
 """
@@ -13,8 +13,15 @@ import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
 
-from aaw_core.host.detect import dialog_is_open, has_claude_history, pane_input_is_empty, strip_ansi
+from aaw_core.host.detect import (
+    dialog_is_open,
+    has_claude_history,
+    has_scoot_history,
+    pane_input_is_empty,
+    strip_ansi,
+)
 
 _TMUX_BIN = shutil.which("tmux") or "tmux"
 SEND_ATTEMPTS = 5
@@ -138,8 +145,35 @@ def agent_command(agent: str, project_dir) -> str:
     if agent == "codex":
         return "codex"
     if agent == "scoot":
-        return "scoot --approval auto-read --scope anywhere --continue"
+        resume = " --continue" if has_scoot_history(Path(project_dir)) else ""
+        return f"scoot --approval auto-read --scope anywhere{resume}"
     return "claude --continue" if has_claude_history(project_dir) else "claude"
+
+
+def create_session(session: str, project_dir, agent: str, project_id: str,
+                   extra_env: dict[str, str] | None = None) -> tuple[bool, str]:
+    """A detached tmux session running the agent, tagged with the session's identity so
+    the hooks find their feed. Returns (ok, error text).
+
+    -e PATH: a tmux session inherits the tmux *server's* environment, and that server may
+    have been spawned by the supervisor (a systemd user service, PATH without ~/.local/bin),
+    so "claude" would be "command not found" in the pane even though the launching shell
+    finds it. The agent's own exit leaves a sentinel line and a paused shell behind, so a
+    crash stays readable and the daemon can tell "ended" from "still starting"."""
+    cmd = agent_command(agent, project_dir)
+    full_cmd = f"{cmd}; echo '{SESSION_ENDED_SENTINEL}'; read -p 'Press Enter'"
+    env = {"AAW_PROJECT": project_id, "AAW_AGENT": agent, "PATH": os.environ.get("PATH", "")}
+    env.update(extra_env or {})
+    args = ["new-session", "-d", "-s", session, "-c", str(project_dir)]
+    for k, v in env.items():
+        args += ["-e", f"{k}={v}"]
+    try:
+        result = tmux_run([*args, full_cmd], capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, f"{type(e).__name__}: {e}"
+    if result.returncode != 0:
+        return False, (result.stderr or b"").decode(errors="replace").strip()[:200]
+    return True, ""
 
 
 def restart_agent(session: str, project_dir, agent: str, project_id: str) -> bool:
@@ -151,19 +185,11 @@ def restart_agent(session: str, project_dir, agent: str, project_id: str) -> boo
     if project_dir is None:
         print("[daemon] /restart: no project dir; session killed, not restarted", flush=True)
         return False
-    cmd = agent_command(agent, project_dir)
-    full_cmd = f"{cmd}; echo '{SESSION_ENDED_SENTINEL}'; read -p 'Press Enter'"
-    result = tmux_run([
-        "new-session", "-d", "-s", session, "-c", str(project_dir),
-        "-e", f"AAW_PROJECT={project_id}", "-e", f"AAW_AGENT={agent}",
-        "-e", f"AGENT_BRIDGE_PROJECT={project_id}", "-e", f"AGENT_BRIDGE_AGENT={agent}",  # legacy names
-        "-e", f"PATH={os.environ.get('PATH', '')}",
-        full_cmd,
-    ], capture_output=True, timeout=10)
-    if result.returncode != 0:
-        print(f"[daemon] /restart: failed to create session: {result.stderr.decode()[:200]}", file=sys.stderr, flush=True)
+    ok, err = create_session(session, project_dir, agent, project_id)
+    if not ok:
+        print(f"[daemon] /restart: failed to create session: {err}", file=sys.stderr, flush=True)
         return False
-    print(f"[daemon] /restart: new session started ({cmd})", flush=True)
+    print(f"[daemon] /restart: new session started ({agent_command(agent, project_dir)})", flush=True)
     if sys.platform == "darwin":  # best effort: show it in Terminal.app
         try:
             subprocess.run(["osascript", "-e", f'tell application "Terminal" to do script "tmux attach -t ={session}"'],

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 import aaw_core
 from aaw_core.config import load_settings
 from aaw_core.host.cli import main
@@ -29,5 +31,7 @@ def test_env_overrides_config_file(monkeypatch, tmp_path):
 
 
 def test_cli_version_flag(capsys):
-    assert main(["--version"]) == 0
+    with pytest.raises(SystemExit) as e:  # argparse's version action exits
+        main(["--version"])
+    assert e.value.code == 0
     assert aaw_core.__version__ in capsys.readouterr().out

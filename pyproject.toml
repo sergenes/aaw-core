@@ -26,6 +26,7 @@ classifiers = [
 dependencies = [
   "websockets>=12",
   "cryptography>=42",
+  "qrcode>=7",  # `aaw link` prints the pairing QR in the terminal
 ]
 
 [project.optional-dependencies]

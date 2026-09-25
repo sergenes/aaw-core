@@ -20,12 +20,24 @@ Frames are JSON text messages with a ``type``:
     ack              {project_id, seq}                          (phone)    advance its cursor
     history          {req, project_id, limit?}                  (either)   retained events, oldest first
     commands         {req, project_id}                          (either)   unconsumed commands
+    project          {req, project_id}                          (either)   the merged project doc
+    projects         {req}                                      (either)   every project doc of the computer
+    clear_events     {project_id}                               (computer) wipe a project's feed
+    request          {req, kind, payload}                       (phone)    ask the computer (start a
+                                                                           session, browse a folder, ...)
+    response         {req, kind, payload}                       (computer) the answer to a request
     ping
 
   relay -> client
     welcome {computer_id}; event {project_id, seq, event}; state; computer; command;
     command_update; command_delete; history {req, project_id, events}; commands {req, project_id, commands};
+    project {req, project_id, fields}; projects {req, projects}; clear_events {project_id};
+    request {req, kind, payload} (to the computer); response {req, kind, payload} (to the phones;
+    the relay itself answers {error: "offline"} when no computer socket is live);
     pong; error {message} (then the socket closes)
+
+A request is live-only: the computer must be connected to answer it, and the
+phone learns at once when it is not. Everything else is stored and forwarded.
 
 Trust model: a computer token is registered on first use (trust on first use) and
 is bound to its computer_id forever; a phone token must have been registered by
@@ -252,6 +264,7 @@ class Relay:
             "command_update": self._on_command_update, "command_delete": self._on_command_delete,
             "subscribe": self._on_subscribe, "ack": self._on_ack, "history": self._on_history,
             "commands": self._on_commands, "project": self._on_project, "clear_events": self._on_clear_events,
+            "projects": self._on_projects, "request": self._on_request, "response": self._on_response,
         }.get(kind)
         if handler is None:
             await conn.send({"type": "error", "message": f"unknown frame type {kind!r}"})
@@ -406,6 +419,32 @@ class Relay:
                                    (conn.computer_id, project_id))
         await conn.send({"type": "project", "req": frame.get("req"), "project_id": project_id,
                          "fields": json.loads(row["doc"]) if row else {}})
+
+    async def _on_projects(self, conn: Conn, frame: dict) -> None:
+        """Every project document of this computer, keyed by project id (the supervisor's
+        registry of sessions, live and stopped)."""
+        rows = await self._fetchall("SELECT project_id, doc FROM projects WHERE computer_id=?", (conn.computer_id,))
+        await conn.send({"type": "projects", "req": frame.get("req"),
+                         "projects": {r["project_id"]: json.loads(r["doc"]) for r in rows}})
+
+    async def _on_request(self, conn: Conn, frame: dict) -> None:
+        """A phone asks the computer for something only the computer can do. Live-only:
+        with no computer socket the relay answers on its behalf, so the phone never
+        waits on a request nobody will see."""
+        if conn.role != "phone":
+            return
+        out = {"type": "request", "req": frame.get("req"), "kind": frame.get("kind"),
+               "payload": frame.get("payload") or {}}
+        if await self._forward(conn.computer_id, out, role="computer") == 0:
+            await conn.send({"type": "response", "req": frame.get("req"), "kind": frame.get("kind"),
+                             "payload": {"error": "offline"}})
+
+    async def _on_response(self, conn: Conn, frame: dict) -> None:
+        if conn.role != "computer":
+            return
+        await self._forward(conn.computer_id, {"type": "response", "req": frame.get("req"),
+                                               "kind": frame.get("kind"), "payload": frame.get("payload") or {}},
+                            role="phone")
 
     async def _on_clear_events(self, conn: Conn, frame: dict) -> None:
         """Wipe a project's retained feed (the user ran /clear); sequence numbers start over."""

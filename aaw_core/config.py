@@ -35,10 +35,32 @@ class Settings:
     relay_url: str | None  # wss://... ; required to bridge to a phone, None = local only
     computer_name: str
     keep_awake: bool
+    browse_roots: tuple[str, ...] = ("~",)  # folders the phone may browse and start sessions in
+    local_notifications: bool = True  # desktop banners (osascript / notify-send)
+    waiting_alert_seconds: int = 0  # 0 = no "waiting for your answer" desktop alert
 
     @property
     def sessions_dir(self) -> Path:
         return self.state_dir / "sessions"
+
+    @property
+    def run_dir(self) -> Path:
+        """Pid files of the daemons and the keep-awake helper."""
+        return self.state_dir / "run"
+
+    def daemon_pid_file(self, project_id: str) -> Path:
+        return self.run_dir / f"daemon.{project_id}.pid"
+
+    def daemon_log_file(self, project_id: str) -> Path:
+        return self.logs_dir / f"daemon.{project_id}.log"
+
+    @property
+    def keep_awake_pid_file(self) -> Path:
+        return self.run_dir / "keep-awake.pid"
+
+    @property
+    def supervisor_log_file(self) -> Path:
+        return self.logs_dir / "supervisor.log"
 
     @property
     def session_key_file(self) -> Path:
@@ -73,9 +95,22 @@ def load_settings() -> Settings:
             return value
         return cfg.get(key, default)
 
+    def flag(env: str, key: str, default: str) -> bool:
+        return str(pick(env, key, default)).lower() in ("1", "true", "yes")
+
+    roots = pick("AAW_BROWSE_ROOTS", "browse_roots", "~")
+    if isinstance(roots, str):
+        roots = [r for r in roots.split(os.pathsep) if r]
+    try:
+        waiting = int(pick("AAW_WAITING_ALERT_SECONDS", "waiting_alert_seconds", 0))
+    except (TypeError, ValueError):
+        waiting = 0
     return Settings(
         state_dir=state_dir,
         relay_url=pick("AAW_RELAY_URL", "relay_url", None),
         computer_name=pick("AAW_COMPUTER_NAME", "computer_name", os.uname().nodename),
-        keep_awake=str(pick("AAW_KEEP_AWAKE", "keep_awake", "true")).lower() in ("1", "true", "yes"),
+        keep_awake=flag("AAW_KEEP_AWAKE", "keep_awake", "true"),
+        browse_roots=tuple(str(r) for r in roots) or ("~",),
+        local_notifications=flag("AAW_LOCAL_NOTIFICATIONS", "local_notifications", "true"),
+        waiting_alert_seconds=max(0, waiting),
     )

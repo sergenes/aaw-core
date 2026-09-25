@@ -6,34 +6,42 @@ A small Python WebSocket server that connects a headless host to a phone. It is 
 
 ## Connection and auth
 
-- Each device opens `wss://<relay>/v1/ws` and sends `{"type": "hello", "token": "<pairing token>"}`.
-- The pairing token is minted at QR time and maps to `(computer_id, role, push_token, platform)`. It is a routing credential only; it is **not** the encryption key and cannot decrypt anything.
-- `role` is `computer` or `phone`. A computer keeps one outbound socket open continuously (which is why no ports, tunnels, or VPNs are needed); a phone connects while the app is in the foreground.
+- Each device opens `wss://<relay>/v1/ws` and sends a `hello` with its `role` (`computer` or `phone`) and `token`.
+- A computer token is trusted on first use and bound to its `computer_id` from then on; a phone token must have been registered by that computer (`register_phone`), which is how it rides in the QR code.
+  Tokens are routing credentials only; they are **not** the encryption key and cannot decrypt anything.
+- A computer keeps outbound sockets open continuously (the supervisor, one daemon per session, a short-lived one per hook run), which is why no ports, tunnels, or VPNs are needed; a phone connects while the app is in the foreground.
 
-## Envelope
+## Frames
 
-```json
-{ "type": "event | command | ack | heartbeat | presence",
-  "id": "<uuid>", "computer_id": "...", "project_id": "...",
-  "seq": 1234, "ts": 1699999999000, "payload_enc": "<AES-GCM blob>" }
-```
+JSON text messages with a `type`; the full list, with directions and payloads, is the module docstring of `aaw_core/relay/server.py`.
+In short:
+
+- computer to phone, stored and forwarded: `event` (feed items, with a per-project `seq` the phone `ack`s), `state` (project document merges), `computer` (computer document merges), `clear_events`.
+- either direction, stored until consumed: `command` (a prompt, an answer, a scheduled prompt with `deliver_at`), `command_update`, `command_delete`.
+- reads: `history`, `commands`, `project`, `projects`.
+- phone to computer, live only: `request` (start a stopped session, start a new one at a browsed folder, list a folder, read a file) answered by the computer's `response`; the relay answers `{error: "offline"}` itself when no computer socket is live.
 
 Event and command payload shapes, and which fields are encrypted, are the contract with the phone apps: see `docs/protocol.contract.md`. They must not change.
 
 ## Store-and-forward and push
 
-- On a computer `event`: assign a per-`(computer_id, project_id)` monotonic `seq`, persist it briefly, and forward immediately if the phone has a live socket; otherwise trigger a wake-up push (FCM/APNs, content-free) to the phone's `push_token`.
-- On phone connect: replay every event with `seq` greater than the phone's last `ack`, then go live.
-- A `command` (prompt, answer, scheduled prompt with `deliver_at`) is buffered until the computer acks it. Both directions carry a TTL, so nothing lingers.
+- On a computer `event`: assign a per-`(computer_id, project_id)` monotonic `seq`, persist it (90 days), and forward immediately if a phone has a live socket; otherwise trigger a wake-up push (FCM/APNs, content-free) through the `PushSender` the deployment plugs in.
+- On phone `subscribe`: replay every event with `seq` greater than the phone's last `ack`, then go live.
+- A `command` is buffered until the computer marks it consumed (30 days at most), and every unconsumed command is replayed to the computer on each connect.
 
-## Buffer schema (SQLite)
+## Store schema (SQLite)
 
 ```
-devices(token PK, computer_id, role, push_token, platform, last_seen)
-events(id PK, computer_id, project_id, seq, ts, payload_enc, expires_at)
-cursors(device, computer_id, project_id, last_ack_seq)
-commands(id PK, computer_id, project_id, ts, payload_enc, consumed, expires_at)
+devices(token PK, computer_id, role, computer_name, platform, push_token, last_seen)
+events(id PK, computer_id, project_id, seq, ts, type, payload, expires_at)
+seqs(computer_id, project_id, last_seq)
+cursors(token, computer_id, project_id, last_ack_seq)
+commands(id PK, computer_id, project_id, ts, doc, consumed, expires_at)
+projects(computer_id, project_id, doc)
+computers(computer_id PK, doc)
 ```
+
+`payload` and `doc` hold the documents as the devices wrote them: every sensitive field inside is ciphertext.
 
 ## Capacity
 

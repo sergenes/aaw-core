@@ -359,3 +359,56 @@ def test_transport_end_to_end(live_relay, tmp_path):
         phone.close()
     finally:
         rt.stop()
+
+
+def test_projects_listing_and_request_response_routing(relay):
+    with relay.websocket_connect("/v1/ws") as comp:
+        hello_computer(comp)
+        register_phone(comp)
+        comp.send_json({"type": "state", "project_id": "a", "fields": {"status": "running"}})
+        comp.send_json({"type": "state", "project_id": "b", "fields": {"status": "stopped"}})
+        comp.send_json({"type": "projects", "req": "r1"})
+        got = comp.receive_json()
+        assert got["type"] == "projects" and got["req"] == "r1"
+        assert got["projects"] == {"a": {"status": "running"}, "b": {"status": "stopped"}}
+        with relay.websocket_connect("/v1/ws") as phone:
+            hello_phone(phone, "ptok")
+            # the phone asks, the computer answers, the reply lands on the phone
+            phone.send_json({"type": "request", "req": "q1", "kind": "fs_browse", "payload": {"path_enc": "x"}})
+            req = comp.receive_json()
+            assert req == {"type": "request", "req": "q1", "kind": "fs_browse", "payload": {"path_enc": "x"}}
+            comp.send_json({"type": "response", "req": "q1", "kind": "fs_browse", "payload": {"error": ""}})
+            assert phone.receive_json() == {"type": "response", "req": "q1", "kind": "fs_browse",
+                                            "payload": {"error": ""}}
+            # a computer cannot send requests, and a phone cannot answer them (both ignored)
+            comp.send_json({"type": "request", "req": "q2", "kind": "fs_browse", "payload": {}})
+            phone.send_json({"type": "response", "req": "q2", "kind": "fs_browse", "payload": {}})
+            comp.send_json({"type": "ping"})
+            assert comp.receive_json() == {"type": "pong"}
+    # no computer socket: the relay answers offline at once
+    with relay.websocket_connect("/v1/ws") as phone:
+        hello_phone(phone, "ptok")
+        phone.send_json({"type": "request", "req": "q3", "kind": "start_session", "payload": {"project_id": "b"}})
+        assert phone.receive_json() == {"type": "response", "req": "q3", "kind": "start_session",
+                                        "payload": {"error": "offline"}}
+
+
+def test_transport_serves_requests_and_lists_projects(live_relay, tmp_path):
+    rt = RelayTransport(relay_url=live_relay, token=new_token(), computer_id="mac-2", project_id="_supervisor",
+                        sessions_dir=tmp_path / "sessions", computer_name="box", enc_key=KEY).start()
+    try:
+        assert rt.wait_connected(10)
+        phone = _phone_connect(live_relay, rt.register_phone_token())
+        rt.set_project_fields("proj", {"status": "stopped", "agent": "codex"})
+        assert _poll_until(lambda: rt.list_projects().get("proj")) == {"status": "stopped", "agent": "codex"}
+        assert rt.list_commands("proj") == []
+        phone.send(json.dumps({"type": "request", "req": "r9", "kind": "start_session",
+                               "payload": {"project_id": "proj"}}))
+        frame = rt.requests.get(timeout=5)
+        assert frame["kind"] == "start_session" and frame["payload"] == {"project_id": "proj"}
+        rt.respond(frame, {"result": "started", "session_id": "proj"})
+        reply = _recv_until(phone, lambda f: f.get("type") == "response")
+        assert reply["req"] == "r9" and reply["payload"] == {"result": "started", "session_id": "proj"}
+        phone.close()
+    finally:
+        rt.stop()

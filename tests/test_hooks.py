@@ -89,7 +89,7 @@ def test_mobile_mode_helpers(settings):
 def test_hook_log_and_tmux_session(settings):
     common.hook_log(settings, "x", "hello")
     assert "hello" in (settings.logs_dir / "x.log").read_text()
-    assert common.tmux_session("my-app") == "cb-my-app"
+    assert common.tmux_session("my-app") == "aaw-my-app"
     assert common.tmux_session("") == "claude"
 
 

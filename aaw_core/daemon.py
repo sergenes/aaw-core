@@ -8,7 +8,7 @@ scheduled prompts once their time comes.
     python -m aaw_core.daemon --project-dir PATH [--project-id ID] [--agent NAME]
 
 The project id is the session identity (the feed's project id, the tmux name minus
-"cb-", the log file stem). It defaults to the folder basename; a parallel session on
+"aaw-", the log file stem). It defaults to the folder basename; a parallel session on
 the same folder is just a second id ("<base>-codex") passed explicitly. Nothing here
 derives an id.
 """
@@ -666,7 +666,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="aaw-daemon", description="Agents At Work Core session daemon")
     p.add_argument("--project-dir", metavar="PATH", required=True, help="the project folder the agent runs in")
     p.add_argument("--project-id", metavar="ID", default=None,
-                   help="session identity (feed id, tmux name minus 'cb-'); defaults to the folder basename")
+                   help="session identity (feed id, tmux name minus 'aaw-'); defaults to the folder basename")
     p.add_argument("--agent", metavar="NAME", default="claude", help="claude, codex, gemini, grok, cursor, or scoot")
     a = p.parse_args(argv)
     return run_session(load_settings(), Path(a.project_dir).resolve(), agent=a.agent, project_id=a.project_id)

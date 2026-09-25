@@ -179,7 +179,7 @@ def notify(transport: RelayTransport | None, message: str, level: str = "info", 
 
 # ── tmux ────────────────────────────────────────────────────────────────────
 
-TMUX_PREFIX = "cb-"
+TMUX_PREFIX = "aaw-"  # distinct from the commercial host's "cb-", so both can share a machine
 
 
 def tmux_session(project_id: str) -> str:

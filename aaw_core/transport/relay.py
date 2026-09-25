@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import queue
 import secrets
 import shutil
 import subprocess
@@ -70,6 +71,7 @@ class RelayTransport:
         self._lock = threading.Lock()
         self._inbox: dict[str, dict] = {}  # unconsumed commands for this project, by id
         self._pending: dict[str, Future] = {}  # request id -> reply future
+        self.requests: queue.Queue[dict] = queue.Queue()  # phone requests for the supervisor to answer
         self._buffer: list[dict] = []  # outbound frames queued before/without a loop
         self._queue: asyncio.Queue | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -212,11 +214,13 @@ class RelayTransport:
         elif kind == "command_delete" and frame.get("project_id") == self.project_id:
             with self._lock:
                 self._inbox.pop(frame.get("command_id", ""), None)
-        elif kind in ("history", "commands", "project") and frame.get("req"):
+        elif kind in ("history", "commands", "project", "projects") and frame.get("req"):
             with self._lock:
                 fut = self._pending.get(frame["req"])
             if fut is not None and not fut.done():
                 fut.set_result(frame)
+        elif kind == "request" and frame.get("req"):
+            self.requests.put(frame)
         elif kind == "error":
             print(f"[relay] error: {frame.get('message')}", file=sys.stderr, flush=True)
 
@@ -265,6 +269,10 @@ class RelayTransport:
     def update_project(self, **fields) -> None:
         self._send({"type": "state", "project_id": self.project_id, "fields": fields})
 
+    def set_project_fields(self, project_id: str, fields: dict) -> None:
+        """Merge fields into any project's document (the supervisor's reconcile writes)."""
+        self._send({"type": "state", "project_id": project_id, "fields": fields})
+
     def get_project(self) -> dict:
         """The project document as the relay holds it (status, auto_approve, pending_question_id, ...)."""
         reply = self._request({"type": "project", "project_id": self.project_id})
@@ -273,6 +281,22 @@ class RelayTransport:
     def clear_events(self) -> None:
         """Wipe this project's retained feed on the relay (the user ran /clear in the agent)."""
         self._send({"type": "clear_events", "project_id": self.project_id})
+
+    def list_projects(self) -> dict[str, dict]:
+        """Every project document of this computer, by project id (live and stopped sessions)."""
+        reply = self._request({"type": "projects"})
+        return reply.get("projects") or {}
+
+    def list_commands(self, project_id: str) -> list:
+        """The unconsumed command documents of any project on this computer (raw, undecrypted)."""
+        reply = self._request({"type": "commands", "project_id": project_id})
+        return reply.get("commands") or []
+
+    # ── phone requests (answered by the supervisor) ───────────────────────────
+
+    def respond(self, request: dict, payload: dict) -> None:
+        """Answer one frame taken from ``requests``."""
+        self._send({"type": "response", "req": request.get("req"), "kind": request.get("kind"), "payload": payload})
 
     # ── events ────────────────────────────────────────────────────────────────
 
