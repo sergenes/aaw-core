@@ -137,6 +137,19 @@ def refresh_mobile_mode(settings: Settings) -> None:
         pass
 
 
+def set_mobile_mode(settings: Settings) -> None:
+    """Record phone activity (the daemon calls this on every phone command or answer).
+    Same rule as refresh: a manually enabled mode is never overwritten."""
+    refresh_mobile_mode(settings)
+
+
+def clear_mobile_mode(settings: Settings) -> None:
+    try:
+        settings.mobile_mode_file.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 # ── notifications ───────────────────────────────────────────────────────────
 
 
