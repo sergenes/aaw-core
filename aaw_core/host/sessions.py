@@ -54,7 +54,8 @@ class Session:
 def _processes() -> list[tuple[int, str]]:
     """(pid, command line) of every process visible to this user."""
     try:
-        r = subprocess.run(["ps", "-A", "-o", "pid=,args="], capture_output=True, text=True,
+        # -ww: procps truncates args to 80 columns when stdout is not a tty (a service, CI)
+        r = subprocess.run(["ps", "-A", "-ww", "-o", "pid=,args="], capture_output=True, text=True,
                            timeout=10, check=False)
     except (OSError, subprocess.SubprocessError):
         return []
@@ -313,10 +314,10 @@ def start_session(settings: Settings, project_dir: Path, project: str, agent: st
     if not project_dir.is_dir():
         raise SessionError(f"project folder not found: {project_dir}\n"
                            "  The folder was moved or deleted, or is not mounted.")
-    if not shutil.which("tmux"):
-        raise SessionError("tmux is not installed (brew install tmux / apt install tmux)")
     if agent not in AGENTS:
         raise SessionError(f"agent must be one of {', '.join(AGENTS)}")
+    if not shutil.which("tmux"):
+        raise SessionError("tmux is not installed (brew install tmux / apt install tmux)")
     if not settings.enabled_flag.exists():
         raise SessionError("the host is off; start the supervisor first (aaw supervisor, or the service)")
     session = tmux_session(project)
