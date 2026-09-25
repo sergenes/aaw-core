@@ -366,7 +366,12 @@ class RelayTransport:
         self._send({"type": "command_update", "project_id": self.project_id, "command_id": doc["id"],
                     "fields": {"consumed": True}})
         self.set_project_status("running", pending_question_id="")
-        return self.decrypt_field(p["answer_enc"]) if p.get("answer_enc") else p.get("answer", "")
+        answer = self.decrypt_field(p["answer_enc"]) if p.get("answer_enc") else p.get("answer", "")
+        # The answer's trace in the feed, right after its question, once the question card
+        # is gone. The phone cannot write events on the relay, so the computer does it.
+        if answer:
+            self.write_event("message", {"role": "user", "content": answer})
+        return answer
 
     def poll_answer(self, deadline: float) -> str | None:
         while time.time() < deadline:

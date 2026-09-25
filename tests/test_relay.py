@@ -356,6 +356,10 @@ def test_transport_end_to_end(live_relay, tmp_path):
             "id": "ans-1", "type": "answer", "ts": int(time.time() * 1000), "consumed": False,
             "payload": {"question_id": q["event"]["id"], "answer_enc": encrypt("Yes", KEY)}}}))
         assert _poll_until(lambda: rt.poll_perm_answer_once(q["event"]["id"])) == "Yes"
+        # the computer echoes the answer into the feed, since the phone cannot write events
+        echoed = _recv_until(phone, lambda f: f.get("type") == "event" and f["event"]["type"] == "message"
+                             and decrypt(f["event"]["payload"]["content"], KEY) == "Yes")
+        assert echoed["event"]["payload"]["role"] == "user"
         phone.close()
     finally:
         rt.stop()
@@ -453,3 +457,47 @@ def test_a_stale_push_token_is_forgotten(tmp_path):
         comp.send_json({"type": "ping"})
         assert comp.receive_json() == {"type": "pong"}
     assert push.calls == 1  # the second event found no token left to push to
+
+
+def test_phone_reads_the_computer_doc_and_sets_only_its_own_project_fields(relay):
+    with relay.websocket_connect("/v1/ws") as comp:
+        hello_computer(comp)
+        register_phone(comp)
+        comp.send_json({"type": "computer", "fields": {"name": "box", "platform": "macos"}})
+        comp.send_json({"type": "state", "project_id": "p", "fields": {"status": "running"}})
+        comp.send_json({"type": "ping"})
+        assert comp.receive_json() == {"type": "pong"}
+        with relay.websocket_connect("/v1/ws") as phone:
+            hello_phone(phone, "ptok")
+            phone.send_json({"type": "computer", "req": "r1"})
+            assert phone.receive_json() == {"type": "computer", "req": "r1",
+                                            "fields": {"name": "box", "platform": "macos"}}
+            # auto_approve lands on the doc; status is the computer's and is dropped
+            phone.send_json({"type": "state", "project_id": "p", "fields": {"auto_approve": True, "status": "stopped"}})
+            phone.send_json({"type": "project", "req": "r2", "project_id": "p"})
+            assert phone.receive_json()["fields"] == {"status": "running", "auto_approve": True}
+            # a merge with nothing the phone may set is ignored entirely
+            phone.send_json({"type": "state", "project_id": "p", "fields": {"status": "stopped"}})
+            phone.send_json({"type": "project", "req": "r3", "project_id": "p"})
+            assert phone.receive_json()["fields"]["status"] == "running"
+
+
+def test_project_delete_forgets_everything_and_tells_the_other_side(relay):
+    with relay.websocket_connect("/v1/ws") as comp:
+        hello_computer(comp)
+        register_phone(comp)
+        comp.send_json({"type": "state", "project_id": "p", "fields": {"status": "stopped"}})
+        comp.send_json({"type": "event", "project_id": "p", "event": event("e1")})
+        comp.send_json({"type": "command", "project_id": "p", "command": make_command("x", None)})
+        comp.send_json({"type": "ping"})
+        assert comp.receive_json() == {"type": "pong"}  # everything above is stored before the phone joins
+        with relay.websocket_connect("/v1/ws") as phone:
+            hello_phone(phone, "ptok")
+            phone.send_json({"type": "project_delete", "project_id": "p"})
+            assert comp.receive_json() == {"type": "project_delete", "project_id": "p"}
+            phone.send_json({"type": "projects", "req": "r1"})
+            assert phone.receive_json()["projects"] == {}
+            phone.send_json({"type": "history", "req": "r2", "project_id": "p"})
+            assert phone.receive_json()["events"] == []
+            phone.send_json({"type": "commands", "req": "r3", "project_id": "p"})
+            assert phone.receive_json()["commands"] == []

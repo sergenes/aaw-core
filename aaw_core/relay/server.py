@@ -11,8 +11,11 @@ Frames are JSON text messages with a ``type``:
     hello            {role: computer|phone, token, computer_id, computer_name?, platform?, push_token?}
     register_phone   {phone_token}                              (computer) allow a phone token
     event            {project_id, event}                        (computer) new feed item
-    state            {project_id, fields}                       (computer) project doc merge
+    state            {project_id, fields}                       (either)   project doc merge; a phone may
+                                                                           set only auto_approve, pending_message
     computer         {fields}                                   (computer) computer doc merge
+    computer         {req}                                      (phone)    read the computer doc
+    project_delete   {project_id}                               (either)   forget a session entirely
     command          {project_id, command}                      (either)   new command / prompt / answer
     command_update   {project_id, command_id, fields}           (either)
     command_delete   {project_id, command_id}                   (either)
@@ -31,7 +34,8 @@ Frames are JSON text messages with a ``type``:
   relay -> client
     welcome {computer_id}; event {project_id, seq, event}; state; computer; command;
     command_update; command_delete; history {req, project_id, events}; commands {req, project_id, commands};
-    project {req, project_id, fields}; projects {req, projects}; clear_events {project_id};
+    project {req, project_id, fields}; projects {req, projects}; computer {req, fields}; clear_events {project_id};
+    project_delete {project_id};
     request {req, kind, payload} (to the computer); response {req, kind, payload} (to the phones;
     the relay itself answers {error: "offline"} when no computer socket is live);
     pong; error {message} (then the socket closes)
@@ -90,6 +94,10 @@ CREATE TABLE IF NOT EXISTS projects (
   PRIMARY KEY (computer_id, project_id));
 CREATE TABLE IF NOT EXISTS computers (computer_id TEXT PRIMARY KEY, doc TEXT NOT NULL);
 """
+
+
+# The project fields a phone may set; everything else on the document is the computer's.
+PHONE_STATE_FIELDS = {"auto_approve", "pending_message"}
 
 
 class StalePushToken(Exception):
@@ -274,6 +282,7 @@ class Relay:
             "subscribe": self._on_subscribe, "ack": self._on_ack, "history": self._on_history,
             "commands": self._on_commands, "project": self._on_project, "clear_events": self._on_clear_events,
             "projects": self._on_projects, "request": self._on_request, "response": self._on_response,
+            "project_delete": self._on_project_delete,
         }.get(kind)
         if handler is None:
             await conn.send({"type": "error", "message": f"unknown frame type {kind!r}"})
@@ -344,21 +353,39 @@ class Relay:
         return doc
 
     async def _on_state(self, conn: Conn, frame: dict) -> None:
-        if conn.role != "computer":
-            return
+        """A project document merge. The computer writes anything; a phone only the fields
+        that are its own to set (the daemon reads them back with `project`)."""
         project_id, fields = frame["project_id"], frame.get("fields") or {}
+        if conn.role == "phone":
+            fields = {k: v for k, v in fields.items() if k in PHONE_STATE_FIELDS}
+            if not fields:
+                return
         await self._merge_doc("projects", "computer_id=? AND project_id=?", (conn.computer_id, project_id), fields,
                               "INSERT OR REPLACE INTO projects(computer_id, project_id, doc) VALUES(?,?,?)")
         await self._forward(conn.computer_id, {"type": "state", "project_id": project_id, "fields": fields},
-                            role="phone")
+                            exclude=conn.id, role="phone")
 
     async def _on_computer(self, conn: Conn, frame: dict) -> None:
-        if conn.role != "computer":
+        """From the computer: a merge into its document. From a phone (with `req`): a read."""
+        if conn.role == "phone":
+            row = await self._fetchone("SELECT doc FROM computers WHERE computer_id=?", (conn.computer_id,))
+            await conn.send({"type": "computer", "req": frame.get("req"),
+                             "fields": json.loads(row["doc"]) if row else {}})
             return
         fields = frame.get("fields") or {}
         await self._merge_doc("computers", "computer_id=?", (conn.computer_id,), fields,
                               "INSERT OR REPLACE INTO computers(computer_id, doc) VALUES(?,?)")
         await self._forward(conn.computer_id, {"type": "computer", "fields": fields}, role="phone")
+
+    async def _on_project_delete(self, conn: Conn, frame: dict) -> None:
+        """Forget a session: its document, feed, commands and cursors (the phone's "remove")."""
+        project_id = frame["project_id"]
+        async with self.write_lock:
+            for table in ("projects", "events", "commands", "cursors", "seqs"):
+                await self.db.execute(f"DELETE FROM {table} WHERE computer_id=? AND project_id=?",
+                                      (conn.computer_id, project_id))
+            await self.db.commit()
+        await self._forward(conn.computer_id, {"type": "project_delete", "project_id": project_id}, exclude=conn.id)
 
     async def _on_command(self, conn: Conn, frame: dict) -> None:
         project_id, doc = frame["project_id"], frame["command"]

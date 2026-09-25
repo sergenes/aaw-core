@@ -18,7 +18,8 @@ In short:
 
 - computer to phone, stored and forwarded: `event` (feed items, with a per-project `seq` the phone `ack`s), `state` (project document merges), `computer` (computer document merges), `clear_events`.
 - either direction, stored until consumed: `command` (a prompt, an answer, a scheduled prompt with `deliver_at`), `command_update`, `command_delete`.
-- reads: `history`, `commands`, `project`, `projects`.
+- reads: `history`, `commands`, `project`, `projects`, `computer`.
+- either direction: `project_delete` forgets a session; a phone's `state` may set `auto_approve` and `pending_message` only.
 - phone to computer, live only: `request` (start a stopped session, start a new one at a browsed folder, list a folder, read a file) answered by the computer's `response`; the relay answers `{error: "offline"}` itself when no computer socket is live.
 
 Event and command payload shapes, and which fields are encrypted, are the contract with the phone apps: see `docs/protocol.contract.md`. They must not change.
