@@ -1,0 +1,22 @@
+# Self-hosted relay:  docker compose -f relay/docker-compose.yml up -d
+# Then point every computer and phone at wss://<your host>/v1/ws (through your TLS proxy)
+# with AAW_RELAY_URL, and pair with `aaw link`.
+services:
+  relay:
+    build:
+      context: ..
+      dockerfile: relay/Dockerfile
+    image: aaw-relay
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8765:8765"   # expose through a TLS proxy, not directly
+    volumes:
+      - relay-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  relay-data:

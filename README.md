@@ -3,7 +3,7 @@
 **The open-source engine behind [Agents At Work](https://www.agentsatwork.app).**
 Run Claude Code, Codex, Gemini CLI, Grok, Cursor, and Scoot on your own Mac or Linux box, and watch and steer them from your phone: approve tool calls, answer questions, send prompts, schedule prompts for later, from anywhere, end-to-end encrypted.
 
-> **Status: pre-alpha, being built.** This repository is private while the engine is assembled and tested end to end. It becomes public, with a first release on PyPI, only once the host runs against the relay on Linux and macOS with real agents from a clean install.
+> **Status: pre-alpha, feature complete, not yet released.** The engine is ported: encryption, the relay, the transport, the hooks, the daemon, the host (`aaw`), and the login services, with an end-to-end test that runs the real daemon against a real relay and a real tmux session on every CI run (Linux and macOS). This repository stays private, and nothing is on PyPI, until the host has been driven with real agents and a real phone from a clean install on both platforms (`docker/README.md` is the Linux walkthrough).
 
 ## What this is, and what it is not
 

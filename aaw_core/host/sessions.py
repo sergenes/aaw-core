@@ -67,6 +67,17 @@ def _processes() -> list[tuple[int, str]]:
 
 
 def _alive(pid: int) -> bool:
+    """False once the process has exited. A child of this process that exited is a zombie
+    until reaped, and kill -0 still answers for it (macOS has no /proc to tell), so reap
+    our own children here: the supervisor spawns daemons and must see them go."""
+    try:
+        reaped, _ = os.waitpid(pid, os.WNOHANG)
+        if reaped == pid:
+            return False
+    except ChildProcessError:
+        pass  # not our child
+    except OSError:
+        pass
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
