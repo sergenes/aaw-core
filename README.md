@@ -34,7 +34,7 @@ your computer                                          your phone
 pipx install aaw-core                      # Linux or macOS, Python 3.11+
 export AAW_RELAY_URL=wss://relay.example/v1/ws   # the hosted relay, or your own (relay/README.md)
 aaw link                                   # prints a QR code: scan it with the phone app
-aaw supervisor                             # the always-on part (a user service does this after install)
+aaw service install                        # the always-on part, started at every login (or: aaw supervisor)
 cd ~/my-project && claude                  # start an agent as you normally would
 aaw status                                 # see it bridged; approve from your phone
 ```

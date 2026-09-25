@@ -10,6 +10,7 @@
   aaw scheduled ID [...]            list, edit or delete scheduled prompts
   aaw mobile-mode on|off|status     route permission prompts to the phone
   aaw supervisor                    run the always-on part in the foreground
+  aaw service install               ... or as a login service (systemd --user / launchd)
   aaw quit | uninstall              turn the host off / remove it from this machine
 """
 
@@ -31,7 +32,7 @@ from aaw_core import __version__
 from aaw_core.config import Settings, load_settings
 from aaw_core.encryption import load_or_create_key
 from aaw_core.hooks.common import read_key
-from aaw_core.host import hooks_installer, sessions
+from aaw_core.host import hooks_installer, service, sessions
 from aaw_core.host.identity import load_identity, load_or_create_identity
 from aaw_core.host.session_id import resolve
 from aaw_core.transport.relay import RelayTransport
@@ -526,26 +527,25 @@ def cmd_shell_init(a, settings: Settings) -> None:
     sys.stdout.write((SCRIPTS_DIR / "shell_integration.sh").read_text())
 
 
-def _stop_service() -> str:
-    """Stop the user service so it stops respawning daemons; a note where there is none."""
-    if sys.platform == "darwin":
-        if not shutil.which("launchctl"):
-            return "  no launchctl; nothing to stop"
-        r = subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/app.agentsatwork.core.supervisor"],
-                           capture_output=True, text=True, check=False)
-        return "  supervisor service stopped" if r.returncode == 0 else "  supervisor service: not running"
-    if not shutil.which("systemctl"):
-        return "  no systemctl; nothing to stop"
-    r = subprocess.run(["systemctl", "--user", "stop", "aaw-supervisor"], capture_output=True, text=True,
-                       check=False)
-    return "  supervisor service stopped" if r.returncode == 0 else "  supervisor service: not running"
+def cmd_service(a, settings: Settings) -> None:
+    """The supervisor as a login service: systemd --user on Linux, launchd on macOS."""
+    if a.action == "install":
+        print("\n".join(service.install(settings)))
+    elif a.action == "uninstall":
+        print("\n".join(service.uninstall()))
+    elif a.action == "start":
+        print(service.start())
+    elif a.action == "stop":
+        print(service.stop())
+    else:
+        print(f"supervisor service: {service.status()} ({service.unit_path()})")
 
 
 def cmd_quit(a, settings: Settings) -> None:
     """Turn the host off: stop the supervisor service, then every session and daemon. It
-    stays installed and linked; the service brings it back at next login."""
+    stays installed and linked; `aaw service start` (or the next login) brings it back."""
     print("Stopping Agents At Work Core...")
-    print(_stop_service())
+    print(service.stop())
     n = _stop_all(settings)
     print(f"  stopped {n} session{'s' if n != 1 else ''}" if n else "  no sessions were running")
     settings.enabled_flag.unlink(missing_ok=True)
@@ -565,16 +565,9 @@ def cmd_uninstall(a, settings: Settings) -> None:
             print("Cancelled.")
             return
     print("Uninstalling...")
-    print(_stop_service())
+    print("\n".join(service.uninstall()))
     n = _stop_all(settings)
     print(f"  stopped {n} session{'s' if n != 1 else ''}" if n else "  no sessions were running")
-    for unit in (Path.home() / ".config/systemd/user/aaw-supervisor.service",
-                 Path.home() / "Library/LaunchAgents/app.agentsatwork.core.supervisor.plist"):
-        if unit.exists():
-            unit.unlink()
-            print(f"  removed {unit}")
-    if sys.platform != "darwin" and shutil.which("systemctl"):
-        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, check=False)
     for p in hooks_installer.remove_all():
         print(f"  removed hooks from {p}")
     if hooks_installer.remove_shell_integration():
@@ -612,7 +605,8 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=textwrap.dedent("""\
             examples:
               aaw link                               show the QR code that pairs a phone
-              aaw start ~/proj                       start the only installed agent (Claude when several)
+              aaw service install                    run the supervisor at every login (systemd --user / launchd)
+              aaw start ~/proj                      start the only installed agent (Claude when several)
               aaw start ~/proj --agent codex         a second agent on the same folder runs alongside as proj-codex
               aaw start ~/proj --agent scoot --model ollama/qwen2.5:latest
               aaw status                             what is running
@@ -700,6 +694,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_parser("shell-init", help="print the shell functions (for eval in a shell rc)").set_defaults(
         fn=cmd_shell_init)
     sp.add_parser("supervisor", help="run the supervisor in the foreground").set_defaults(fn=cmd_supervisor)
+    s = sp.add_parser("service", help="the supervisor as a login service (systemd --user / launchd)")
+    s.add_argument("action", choices=["install", "uninstall", "start", "stop", "status"])
+    s.set_defaults(fn=cmd_service)
     sp.add_parser("quit", help="turn the host off (stop the supervisor and every session); stays installed"
                   ).set_defaults(fn=cmd_quit)
     s = sp.add_parser("uninstall", help="remove the host from this machine (hooks, service, local state)")

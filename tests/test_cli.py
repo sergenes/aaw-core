@@ -77,6 +77,7 @@ def test_parser_covers_the_commands():
     assert (a.edit, a.text) == (2, "new text")
     for name in ("link", "status", "quit", "supervisor", "shell-init", "install-hooks"):
         assert p.parse_args([name]).fn is not None
+    assert p.parse_args(["service", "install"]).fn is cli.cmd_service
     with pytest.raises(SystemExit):
         p.parse_args(["start", "~/proj", "--agent", "ollama"])
 
