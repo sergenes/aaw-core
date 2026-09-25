@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aaw-core"
+version = "0.0.1"
+description = "Agents At Work Core: the open-source engine behind Agents At Work. Run Claude Code, Codex, Gemini CLI, Grok, Cursor, and Scoot on your own Mac or Linux box and control them from your phone."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "Sergey Nes" }]
+keywords = ["ai-agents", "claude-code", "codex", "gemini-cli", "remote-control", "tmux"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development",
+]
+dependencies = [
+  "websockets>=12",
+  "cryptography>=42",
+]
+
+[project.optional-dependencies]
+# The relay server (what we host for free users; self-hosters run the same thing).
+relay = ["starlette>=0.37", "uvicorn>=0.29", "aiosqlite>=0.20"]
+dev = ["pytest>=8", "ruff>=0.5"]
+
+[project.scripts]
+aaw = "aaw_core.host.cli:main"
+
+[project.urls]
+Homepage = "https://www.agentsatwork.app"
+Repository = "https://github.com/sergenes/aaw-core"
+
+[tool.hatch.build.targets.wheel]
+packages = ["aaw_core"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local config, state, logs
+.env
+.env.*
+*.log
+*.jsonl
+.aaw/
+locks/
+*.pid
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+
+# Belt and braces: secrets never belong here
+*.p8
+*.p12
+*.cer
+*.provisionprofile
+*service-account*.json
+*secrets*.env
