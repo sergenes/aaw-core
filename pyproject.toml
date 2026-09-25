@@ -31,7 +31,7 @@ dependencies = [
 [project.optional-dependencies]
 # The relay server (what we host for free users; self-hosters run the same thing).
 relay = ["starlette>=0.37", "uvicorn>=0.29", "aiosqlite>=0.20"]
-dev = ["pytest>=8", "ruff>=0.5"]
+dev = ["pytest>=8", "ruff>=0.5", "httpx2"]  # httpx2: Starlette's TestClient for the relay tests
 
 [project.scripts]
 aaw = "aaw_core.host.cli:main"

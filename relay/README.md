@@ -2,7 +2,7 @@
 
 A small Python WebSocket server that connects a headless host to a phone. It is the only hosted piece for free users (we run one; self-hosters run the same with `docker compose`), and it never sees plaintext: every payload is AES-256-GCM ciphertext produced on the computer or the phone, and the relay reads only routing metadata.
 
-**Status:** design only; implementation is Phase 2 of the roadmap. Stack: Starlette + `websockets` + `aiosqlite`.
+**Status:** implemented in `aaw_core/relay/` (Starlette + `websockets` + `aiosqlite`) and covered by tests, including a real host-to-relay-to-phone integration run. Run it with `python -m aaw_core.relay --host 0.0.0.0 --port 8765 --db relay.sqlite` (needs `pip install "aaw-core[relay]"`); put it behind a TLS-terminating reverse proxy for `wss://`. The exact frame protocol and the trust model are documented in the module docstring of `aaw_core/relay/server.py`. Not yet built: the `docker compose` packaging and a real FCM/APNs `PushSender` (the hosted deployment plugs one in; the default is a no-op).
 
 ## Connection and auth
 
