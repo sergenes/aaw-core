@@ -251,7 +251,7 @@ class Relay:
             "state": self._on_state, "computer": self._on_computer, "command": self._on_command,
             "command_update": self._on_command_update, "command_delete": self._on_command_delete,
             "subscribe": self._on_subscribe, "ack": self._on_ack, "history": self._on_history,
-            "commands": self._on_commands,
+            "commands": self._on_commands, "project": self._on_project, "clear_events": self._on_clear_events,
         }.get(kind)
         if handler is None:
             await conn.send({"type": "error", "message": f"unknown frame type {kind!r}"})
@@ -398,6 +398,26 @@ class Relay:
             (conn.computer_id, project_id))
         await conn.send({"type": "commands", "req": frame.get("req"), "project_id": project_id,
                          "commands": [json.loads(r["doc"]) for r in rows]})
+
+    async def _on_project(self, conn: Conn, frame: dict) -> None:
+        """The merged project document (status, auto_approve, pending_question_id, ...)."""
+        project_id = frame["project_id"]
+        row = await self._fetchone("SELECT doc FROM projects WHERE computer_id=? AND project_id=?",
+                                   (conn.computer_id, project_id))
+        await conn.send({"type": "project", "req": frame.get("req"), "project_id": project_id,
+                         "fields": json.loads(row["doc"]) if row else {}})
+
+    async def _on_clear_events(self, conn: Conn, frame: dict) -> None:
+        """Wipe a project's retained feed (the user ran /clear); sequence numbers start over."""
+        if conn.role != "computer":
+            return
+        project_id = frame["project_id"]
+        async with self.write_lock:
+            for table in ("events", "cursors", "seqs"):
+                await self.db.execute(f"DELETE FROM {table} WHERE computer_id=? AND project_id=?",
+                                      (conn.computer_id, project_id))
+            await self.db.commit()
+        await self._forward(conn.computer_id, {"type": "clear_events", "project_id": project_id}, role="phone")
 
 
 def create_app(db_path: str, push: PushSender | None = None) -> Starlette:

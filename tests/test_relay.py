@@ -227,6 +227,23 @@ def test_several_sockets_may_share_one_computer_token(relay):
             assert daemon.receive_json()["command"]["id"] == cmd2["id"]
 
 
+def test_project_doc_read_back_and_clear_events(relay):
+    with relay.websocket_connect("/v1/ws") as comp:
+        hello_computer(comp)
+        comp.send_json({"type": "project", "req": "r0", "project_id": "p"})
+        assert comp.receive_json() == {"type": "project", "req": "r0", "project_id": "p", "fields": {}}
+        comp.send_json({"type": "state", "project_id": "p", "fields": {"auto_approve": True, "status": "running"}})
+        comp.send_json({"type": "project", "req": "r1", "project_id": "p"})
+        assert comp.receive_json()["fields"] == {"auto_approve": True, "status": "running"}
+        comp.send_json({"type": "event", "project_id": "p", "event": event("e1")})
+        comp.send_json({"type": "clear_events", "project_id": "p"})
+        comp.send_json({"type": "history", "req": "r2", "project_id": "p"})
+        assert comp.receive_json()["events"] == []
+        comp.send_json({"type": "event", "project_id": "p", "event": event("e2")})
+        comp.send_json({"type": "history", "req": "r3", "project_id": "p"})
+        assert [e["id"] for e in comp.receive_json()["events"]] == ["e2"]
+
+
 # ── integration: RelayTransport <-> uvicorn ─────────────────────────────────
 
 

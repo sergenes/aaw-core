@@ -75,6 +75,7 @@ class RelayTransport:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        self._ws = None  # the live socket, for stop() to close from another thread
         self.connected = threading.Event()
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
@@ -85,10 +86,30 @@ class RelayTransport:
             self._thread.start()
         return self
 
-    def stop(self) -> None:
+    def flush(self, timeout: float = 10.0) -> bool:
+        """Block until every queued outbound frame has been sent. Best effort: False on timeout
+        or when there is no live loop. Hooks call this before exiting so a single event is not
+        lost to process exit."""
+        loop, queue = self._loop, self._queue
+        if loop is None or queue is None:
+            return False
+        try:
+            asyncio.run_coroutine_threadsafe(queue.join(), loop).result(timeout)
+            return True
+        except (TimeoutError, RuntimeError):
+            return False
+
+    def stop(self, flush_timeout: float = 10.0) -> None:
+        """Flush what is queued, then close the socket and stop the background thread."""
+        if self.connected.is_set():
+            self.flush(flush_timeout)
         self._stop.set()
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(lambda: None)
+        loop, ws = self._loop, self._ws
+        if loop is not None and ws is not None:
+            try:
+                asyncio.run_coroutine_threadsafe(ws.close(), loop).result(5)
+            except (TimeoutError, RuntimeError, OSError, websockets.WebSocketException):
+                pass
         if self._thread is not None:
             self._thread.join(timeout=5)
 
@@ -132,16 +153,21 @@ class RelayTransport:
         async def sender():
             while True:
                 frame = await self._queue.get()
-                await ws.send(json.dumps(frame))
+                try:
+                    await ws.send(json.dumps(frame))
+                finally:
+                    self._queue.task_done()  # lets flush() know the queue drained
 
         async def receiver():
             async for raw in ws:
                 self._on_frame(json.loads(raw))
 
+        self._ws = ws
         send_task = asyncio.create_task(sender())
         try:
             await receiver()
         finally:
+            self._ws = None
             send_task.cancel()
 
     # ── frames ────────────────────────────────────────────────────────────────
@@ -186,7 +212,7 @@ class RelayTransport:
         elif kind == "command_delete" and frame.get("project_id") == self.project_id:
             with self._lock:
                 self._inbox.pop(frame.get("command_id", ""), None)
-        elif kind in ("history", "commands") and frame.get("req"):
+        elif kind in ("history", "commands", "project") and frame.get("req"):
             with self._lock:
                 fut = self._pending.get(frame["req"])
             if fut is not None and not fut.done():
@@ -238,6 +264,15 @@ class RelayTransport:
 
     def update_project(self, **fields) -> None:
         self._send({"type": "state", "project_id": self.project_id, "fields": fields})
+
+    def get_project(self) -> dict:
+        """The project document as the relay holds it (status, auto_approve, pending_question_id, ...)."""
+        reply = self._request({"type": "project", "project_id": self.project_id})
+        return reply.get("fields") or {}
+
+    def clear_events(self) -> None:
+        """Wipe this project's retained feed on the relay (the user ran /clear in the agent)."""
+        self._send({"type": "clear_events", "project_id": self.project_id})
 
     # ── events ────────────────────────────────────────────────────────────────
 

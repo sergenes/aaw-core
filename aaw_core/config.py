@@ -48,6 +48,20 @@ class Settings:
     def enabled_flag(self) -> Path:
         return self.state_dir / "enabled"
 
+    @property
+    def mobile_mode_file(self) -> Path:
+        """Holds "manual" or a timestamp while permission prompts should go to the phone."""
+        return self.state_dir / "mobile_mode"
+
+    @property
+    def host_file(self) -> Path:
+        """The persisted host identity (computer id + relay routing token)."""
+        return self.state_dir / "host.json"
+
+    @property
+    def logs_dir(self) -> Path:
+        return self.state_dir / "logs"
+
 
 def load_settings() -> Settings:
     state_dir = Path(os.environ.get("AAW_STATE_DIR") or DEFAULT_STATE_DIR).expanduser()
