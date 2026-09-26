@@ -13,6 +13,7 @@ import plistlib
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from aaw_core.config import Settings
@@ -101,9 +102,16 @@ def install(settings: Settings) -> list[str]:
         _run(["launchctl", "bootout", f"{_launchd_target()}/{LAUNCHD_LABEL}"])  # replace a previous one
         path.write_bytes(render_launchd_plist(exe, env, settings.logs_dir))
         out.append(f"wrote {path}")
-        r = _run(["launchctl", "bootstrap", _launchd_target(), str(path)])
-        if r.returncode != 0:
-            out.append(f"launchctl bootstrap failed: {(r.stderr or r.stdout).strip()}")
+        # launchd unloads asynchronously: a bootstrap right after the bootout fails with
+        # "service already loaded" or an I/O error. Retry for a few seconds.
+        r = None
+        for _ in range(10):
+            r = _run(["launchctl", "bootstrap", _launchd_target(), str(path)])
+            if r.returncode == 0:
+                break
+            time.sleep(0.5)
+        if r is None or r.returncode != 0:
+            out.append(f"launchctl bootstrap failed: {((r.stderr or r.stdout) if r else '').strip()}")
         else:
             out.append("supervisor service started (launchd); it starts again at every login")
         return out
