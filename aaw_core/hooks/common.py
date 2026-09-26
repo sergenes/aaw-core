@@ -16,10 +16,12 @@ import subprocess
 import sys
 import time
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from aaw_core.config import Settings, load_settings
-from aaw_core.host.identity import load_identity
-from aaw_core.transport.relay import RelayTransport
+
+if TYPE_CHECKING:
+    from aaw_core.transport.relay import RelayTransport
 
 # Only aaw-core's own names. The commercial Agents At Work host exports AGENT_BRIDGE_*
 # in its sessions; reading those would run these hooks inside its sessions when both
@@ -95,9 +97,15 @@ def read_key(settings: Settings) -> str | None:
 def open_transport(settings: Settings, project_id: str, *, wait: float = 10.0) -> RelayTransport | None:
     """A short-lived relay transport for one hook run, or None if the host is not linked.
 
-    Callers must ``stop()`` it before exiting (which flushes queued frames)."""
+    Callers must ``stop()`` it before exiting (which flushes queued frames). The socket
+    and AES modules are imported here, not at module load: every hook runs on every
+    agent event and most of them exit at the preamble; those must not pay ~50 ms of
+    imports first."""
     if not settings.relay_url:
         return None
+    from aaw_core.host.identity import load_identity
+    from aaw_core.transport.relay import RelayTransport
+
     ident = load_identity(settings)
     if ident is None:
         return None

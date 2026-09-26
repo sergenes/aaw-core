@@ -18,6 +18,10 @@ from pathlib import Path
 # commercial Agents At Work host, which uses ~/.agent-bridge.
 DEFAULT_STATE_DIR = Path.home() / ".aaw"
 
+# The relay we host for free users. A public endpoint, not a secret, and never a
+# silent default: `aaw link` offers it and writes the choice to config.json.
+HOSTED_RELAY_URL = "wss://relay.agentsatwork.app/v1/ws"
+
 
 def _config_file(state_dir: Path) -> dict:
     path = state_dir / "config.json"
@@ -83,6 +87,16 @@ class Settings:
     @property
     def logs_dir(self) -> Path:
         return self.state_dir / "logs"
+
+
+def save_config(state_dir: Path, **fields) -> Path:
+    """Merge fields into <state dir>/config.json (created if missing)."""
+    path = state_dir / "config.json"
+    current = _config_file(state_dir)
+    current.update(fields)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(current, indent=2) + "\n")
+    return path
 
 
 def load_settings() -> Settings:

@@ -1,6 +1,6 @@
 """aaw: the Agents At Work Core command line.
 
-  aaw link                          pair a phone: show the QR code (relay url, computer id, key, token)
+  aaw link                          pair a phone: choose the relay (first run), show the QR code
   aaw start DIR [--agent A]         start an agent on a folder and attach to its tmux session
   aaw stop [ID | --all]             stop one session, or every session
   aaw status                        sessions, daemons, supervisor, pairing
@@ -29,7 +29,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from aaw_core import __version__
-from aaw_core.config import Settings, load_settings
+from aaw_core.config import HOSTED_RELAY_URL, Settings, load_settings, save_config
 from aaw_core.encryption import load_or_create_key
 from aaw_core.hooks.common import read_key
 from aaw_core.host import hooks_installer, service, sessions
@@ -102,9 +102,33 @@ def qr_payload(settings: Settings, phone_token: str) -> str:
                       sort_keys=True, separators=(",", ":"))
 
 
+def configure_relay(settings: Settings, *, url: str | None = None, ask=input) -> Settings:
+    """Pick the relay this computer uses and save it to config.json. With no `url`, ask:
+    the hosted relay (free, notifications work) or the user's own."""
+    if url is None:
+        if not sys.stdin.isatty():
+            die("no relay configured. Run `aaw link` in a terminal to choose one, pass --relay URL, "
+                "or set relay_url in ~/.aaw/config.json (AAW_RELAY_URL also works).")
+        print("Which relay should this computer use to reach your phone?\n"
+              f"  [1] the Agents At Work relay ({HOSTED_RELAY_URL}): free, hosted by us, notifications work\n"
+              "  [2] your own relay (see relay/README.md; no notifications unless you add a push sender)")
+        choice = ask("Choice [1]: ").strip() or "1"
+        if choice == "1":
+            url = HOSTED_RELAY_URL
+        elif choice == "2":
+            url = ask("Relay URL (wss://your.host/v1/ws): ").strip()
+        else:
+            die("choose 1 or 2")
+    if not url.startswith(("wss://", "ws://")):
+        die(f"a relay URL starts with wss:// (ws:// only for a LAN test): {url!r}")
+    path = save_config(settings.state_dir, relay_url=url)
+    print(f"Relay saved to {path}: {url}")
+    return load_settings()
+
+
 def cmd_link(a, settings: Settings) -> None:
-    if not settings.relay_url:
-        die("no relay configured. Set AAW_RELAY_URL (or relay_url in ~/.aaw/config.json) first.")
+    if a.relay or not settings.relay_url:
+        settings = configure_relay(settings, url=a.relay)
     settings.state_dir.mkdir(parents=True, exist_ok=True)
     ident = load_or_create_identity(settings)
     load_or_create_key(settings.session_key_file)
@@ -627,7 +651,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version=f"aaw-core {__version__}")
     sp = p.add_subparsers(dest="cmd", required=True)
 
-    s = sp.add_parser("link", help="show the QR code to pair a phone")
+    s = sp.add_parser("link", help="show the QR code to pair a phone (asks which relay to use the first time)")
+    s.add_argument("--relay", metavar="URL", help="use this relay (saved to config.json); default: ask once")
     s.add_argument("--show-payload", action="store_true")
     s.add_argument("--light", action="store_true", help="for a light terminal background")
     s.add_argument("--force", action="store_true", help="print the QR even when the terminal is too narrow")

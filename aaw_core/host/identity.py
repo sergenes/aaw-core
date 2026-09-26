@@ -14,7 +14,6 @@ import uuid
 from dataclasses import asdict, dataclass
 
 from aaw_core.config import Settings
-from aaw_core.transport.relay import new_token
 
 
 @dataclass(frozen=True)
@@ -40,6 +39,8 @@ def load_or_create_identity(settings: Settings) -> HostIdentity:
     ident = load_identity(settings)
     if ident is not None:
         return ident
+    from aaw_core.transport.relay import new_token  # the socket stack, only when minting
+
     ident = HostIdentity(computer_id=uuid.uuid4().hex, token=new_token(), computer_name=settings.computer_name)
     path = settings.host_file
     path.parent.mkdir(parents=True, exist_ok=True)

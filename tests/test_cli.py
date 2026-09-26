@@ -67,6 +67,26 @@ def test_qr_payload_creates_identity_and_key(tmp_path):
     assert oct(settings.session_key_file.stat().st_mode & 0o777) == "0o600"
 
 
+def test_configure_relay_offers_the_hosted_relay_and_saves_the_choice(tmp_path, monkeypatch):
+    monkeypatch.setenv("AAW_STATE_DIR", str(tmp_path))
+    monkeypatch.delenv("AAW_RELAY_URL", raising=False)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    settings = cli.load_settings()
+    assert settings.relay_url is None
+    answers = iter([""])  # Enter = the hosted relay
+    settings = cli.configure_relay(settings, ask=lambda prompt: next(answers))
+    assert settings.relay_url == cli.HOSTED_RELAY_URL
+    assert json.loads((tmp_path / "config.json").read_text()) == {"relay_url": cli.HOSTED_RELAY_URL}
+
+    answers = iter(["2", "wss://relay.example/v1/ws"])
+    settings = cli.configure_relay(settings, ask=lambda prompt: next(answers))
+    assert settings.relay_url == "wss://relay.example/v1/ws"
+    with pytest.raises(SystemExit):
+        cli.configure_relay(settings, url="https://not-a-relay")
+    settings = cli.configure_relay(settings, url="ws://192.168.1.5:8765/v1/ws")  # --relay, a LAN test
+    assert settings.relay_url == "ws://192.168.1.5:8765/v1/ws"
+
+
 def test_parser_covers_the_commands():
     p = cli.build_parser()
     a = p.parse_args(["start", "~/proj", "--agent", "codex", "--no-attach"])
