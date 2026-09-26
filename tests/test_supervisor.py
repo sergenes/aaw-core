@@ -191,3 +191,11 @@ def test_refresh_cache_mirrors_the_documents_for_a_local_gui(sup):
     sup.refresh_cache()
     assert sup.transport.mirrored == sup.transport.projects
     assert sup.cache["proj"]["agent"] == "codex" and "_supervisor" not in sup.cache
+
+
+def test_stop_request_writes_stopped_right_away(sup, monkeypatch):
+    monkeypatch.setattr(sessions, "session_alive", lambda p: True)
+    monkeypatch.setattr(sessions, "stop_session", lambda settings, p: ["stopped it"])
+    assert sup.handle_request("stop_session", {"project_id": "proj"}) == {"result": "stopped", "session_id": "proj"}
+    pid, fields = sup.transport.project_writes[-1]
+    assert pid == "proj" and fields["status"] == "stopped" and fields["pending_question_id"] == ""

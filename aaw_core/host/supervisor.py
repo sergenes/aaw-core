@@ -257,6 +257,9 @@ class Supervisor:
             return {"result": "not_found"}
         for line in sessions.stop_session(self.settings, pid):
             self.log(line)
+        # Right away, not when the dying daemon gets to it (a stop may kill it first).
+        self.transport.set_project_fields(pid, {"status": "stopped", "last_event_ts": int(time.time()),
+                                                "pending_question_id": ""})
         return {"result": "stopped", "session_id": pid}
 
     def req_new_session(self, payload: dict) -> dict:

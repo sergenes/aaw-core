@@ -252,6 +252,7 @@ def _stop_all(settings: Settings) -> int:
     n = 0
     for s in sessions.list_sessions():
         sessions.stop_session(settings, s.project)
+        _write_stopped(settings, s.project)
         n += 1
     return n
 
@@ -264,6 +265,23 @@ def cmd_stop(a, settings: Settings) -> None:
     if not sessions.session_alive(a.id) and not sessions.daemon_pid(settings, a.id):
         die(f"no running session {a.id}")
     print("\n".join(sessions.stop_session(settings, a.id)))
+    _write_stopped(settings, a.id)
+
+
+def _write_stopped(settings: Settings, project: str) -> None:
+    """Tell the phone right away. The daemon writes the same when it sees its tmux session
+    go, but a stop kills the daemon a moment later and may win that race."""
+    if not settings.relay_url or load_identity(settings) is None:
+        return
+    try:
+        t = _transport(settings, project, wait=5)
+    except SystemExit:
+        return
+    try:
+        t.set_project_status("stopped", pending_question_id="")
+        t.flush(5)
+    finally:
+        t.stop(flush_timeout=0)
 
 
 def status_snapshot(settings: Settings) -> dict:
