@@ -40,12 +40,13 @@ def test_env_precedence_and_defaults(monkeypatch):
     monkeypatch.delenv("AAW_AGENT", raising=False)
     monkeypatch.delenv("AGENT_BRIDGE_AGENT", raising=False)
     assert common.env_project() == "" and common.env_agent() == "claude"
-    monkeypatch.setenv("AGENT_BRIDGE_PROJECT", "legacy")
+    # the commercial host's variables never count: its sessions must not run these hooks
+    monkeypatch.setenv("AGENT_BRIDGE_PROJECT", "theirs")
     monkeypatch.setenv("AGENT_BRIDGE_AGENT", "codex")
-    assert common.env_project() == "legacy" and common.env_agent() == "codex"
-    monkeypatch.setenv("AAW_PROJECT", "new")
+    assert common.env_project() == "" and common.env_agent() == "claude"
+    monkeypatch.setenv("AAW_PROJECT", "ours")
     monkeypatch.setenv("AAW_AGENT", "gemini")
-    assert common.env_project() == "new" and common.env_agent() == "gemini"  # the new names win
+    assert common.env_project() == "ours" and common.env_agent() == "gemini"
 
 
 def test_preamble_exits_unless_enabled_and_bridged(monkeypatch, settings):

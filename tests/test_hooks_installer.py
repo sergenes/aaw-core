@@ -88,6 +88,17 @@ def test_owned_files_and_remove_all(home, monkeypatch):
     cursor = home / ".cursor" / "hooks.json"
     assert json.loads(grok.read_text())["hooks"]["PreToolUse"][0]["env"] == {"AAW_AGENT": "grok"}
     assert json.loads(cursor.read_text())["version"] == 1
+    # Cursor's file is merged, not owned: a second install keeps one entry per event, and
+    # another tool's entry (the commercial host's) stays next to ours
+    data = json.loads(cursor.read_text())
+    data["hooks"]["stop"].insert(0, {"command": "bash /their/hooks/on_stop.py", "type": "command", "timeout": 30})
+    cursor.write_text(json.dumps(data))
+    hi.update_cursor_hooks()
+    stop = json.loads(cursor.read_text())["hooks"]["stop"]
+    assert [e["command"] for e in stop] == ["bash /their/hooks/on_stop.py", hi.hook_command("on_stop")]
+    theirs_removed = json.loads(cursor.read_text())
+    theirs_removed["hooks"]["stop"] = [e for e in stop if hi.MARKER in e["command"]]
+    cursor.write_text(json.dumps(theirs_removed))
     # a user hook next to ours survives the uninstall; a file that was only ours goes away
     claude = home / ".claude" / "settings.json"
     data = json.loads(claude.read_text())

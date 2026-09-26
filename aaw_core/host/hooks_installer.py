@@ -5,7 +5,7 @@
   Gemini CLI   ~/.gemini/settings.json          merge into "hooks"
   scoot        ~/.config/scoot/hooks.json       merge (flat or nested "hooks")
   Grok CLI     ~/.grok/hooks/aaw-core.json      a file we own
-  Cursor CLI   ~/.cursor/hooks.json             a file we own
+  Cursor CLI   ~/.cursor/hooks.json             merge into "hooks" (flat entries per event)
 
 Every hook command is ``"<this python>" -m aaw_core.hooks.<name>``, so the entries
 are recognizable (``-m aaw_core.hooks.``) whatever the install location. Merging
@@ -223,20 +223,24 @@ def update_grok_hooks() -> Path:
 
 
 def update_cursor_hooks() -> Path:
+    """Cursor's file is flat: one hook object per event entry (no groups). Another tool
+    (the commercial host, for one) may own entries in it, so ours are merged: replaced
+    where they already exist, appended otherwise."""
     path = home() / ".cursor" / "hooks.json"
-
-    def entry(name: str, timeout: int) -> dict:
-        return {"command": hook_command(name), "type": "command", "timeout": timeout}
-
-    _write_json(path, {"version": 1, "hooks": {
-        "preToolUse": [entry("on_pre_tool", PRE_TOOL_TIMEOUT)],
-        "beforeShellExecution": [entry("on_pre_tool", PRE_TOOL_TIMEOUT)],
-        "beforeMCPExecution": [entry("on_pre_tool", PRE_TOOL_TIMEOUT)],
-        "postToolUse": [entry("on_post_tool", 10)],
-        "stop": [entry("on_stop", 30)],
-        "sessionEnd": [entry("on_stop", 30)],
-        "notification": [entry("on_notification", 10)],
-    }})
+    data = _read_json(path)
+    hooks = data.get("hooks") if isinstance(data.get("hooks"), dict) else {}
+    wanted = {
+        "preToolUse": ("on_pre_tool", PRE_TOOL_TIMEOUT), "beforeShellExecution": ("on_pre_tool", PRE_TOOL_TIMEOUT),
+        "beforeMCPExecution": ("on_pre_tool", PRE_TOOL_TIMEOUT), "postToolUse": ("on_post_tool", 10),
+        "stop": ("on_stop", 30), "sessionEnd": ("on_stop", 30), "notification": ("on_notification", 10),
+    }
+    for event, (name, timeout) in wanted.items():
+        entries = [e for e in (hooks.get(event) or []) if MARKER not in json.dumps(e)]
+        entries.append({"command": hook_command(name), "type": "command", "timeout": timeout})
+        hooks[event] = entries
+    data["version"] = data.get("version", 1)
+    data["hooks"] = hooks
+    _write_json(path, data)
     return path
 
 
@@ -292,6 +296,8 @@ def _strip_merged_hooks(path: Path) -> bool:
         else:
             data.pop("hooks", None)
         remaining = data
+        if set(remaining) <= {"version"}:  # Cursor's file with nothing left but its version tag
+            remaining = {}
     else:
         remaining = hooks
     if remaining:
@@ -308,17 +314,18 @@ def remove_all() -> list[str]:
     h = home()
     touched: list[str] = []
     for path in (h / ".claude" / "settings.json", h / ".codex" / "hooks.json",
-                 h / ".gemini" / "settings.json", h / ".config" / "scoot" / "hooks.json"):
+                 h / ".gemini" / "settings.json", h / ".config" / "scoot" / "hooks.json",
+                 h / ".cursor" / "hooks.json"):
         if _strip_merged_hooks(path):
             touched.append(str(path))
-    for path in (h / ".grok" / "hooks" / "aaw-core.json", h / ".cursor" / "hooks.json"):
-        try:
-            ours = path.exists() and MARKER in path.read_text()
-        except OSError:
-            ours = False
-        if ours:
-            path.unlink(missing_ok=True)
-            touched.append(str(path))
+    grok = h / ".grok" / "hooks" / "aaw-core.json"
+    try:
+        ours = grok.exists() and MARKER in grok.read_text()
+    except OSError:
+        ours = False
+    if ours:
+        grok.unlink(missing_ok=True)
+        touched.append(str(grok))
     return touched
 
 

@@ -21,9 +21,11 @@ from aaw_core.config import Settings, load_settings
 from aaw_core.host.identity import load_identity
 from aaw_core.transport.relay import RelayTransport
 
-# The aaw-core names, and the legacy names an older agent start script may still export.
-_PROJECT_VARS = ("AAW_PROJECT", "AGENT_BRIDGE_PROJECT")
-_AGENT_VARS = ("AAW_AGENT", "AGENT_BRIDGE_AGENT")
+# Only aaw-core's own names. The commercial Agents At Work host exports AGENT_BRIDGE_*
+# in its sessions; reading those would run these hooks inside its sessions when both
+# hosts share a machine.
+_PROJECT_VARS = ("AAW_PROJECT",)
+_AGENT_VARS = ("AAW_AGENT",)
 
 LEVEL_EMOJI = {"info": "ℹ", "success": "✓", "warning": "⚠", "error": "✗"}
 

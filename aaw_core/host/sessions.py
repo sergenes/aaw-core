@@ -145,14 +145,13 @@ def session_alive(project: str) -> bool:
 
 
 def session_agent(project: str) -> str | None:
-    """The agent a live session was created for (its AAW_AGENT; the legacy name is read
-    too). A session with no recorded agent counts as claude."""
-    for var in ("AAW_AGENT", "AGENT_BRIDGE_AGENT"):
-        r = tmux.tmux_run(["show-environment", "-t", tmux_session(project), var], capture_output=True, text=True)
-        if r.returncode == 0 and "=" in r.stdout:
-            value = r.stdout.strip().split("=", 1)[1]
-            if value:
-                return value
+    """The agent a live session was created for (its AAW_AGENT). A session with no
+    recorded agent counts as claude."""
+    r = tmux.tmux_run(["show-environment", "-t", tmux_session(project), "AAW_AGENT"], capture_output=True, text=True)
+    if r.returncode == 0 and "=" in r.stdout:
+        value = r.stdout.strip().split("=", 1)[1]
+        if value:
+            return value
     return "claude" if session_alive(project) else None
 
 
@@ -255,7 +254,10 @@ def stop_daemon(settings: Settings, project: str, grace: float = STOP_GRACE_S) -
 
 def _keep_awake_cmd() -> list[str] | None:
     if sys.platform == "darwin":
-        return ["caffeinate", "-dims"]
+        # Spelled out, not "-dims": the commercial host adopts any "caffeinate -dims" as
+        # its own and kills it when its last session ends, and this one would do the same
+        # to it. Distinct command lines keep the two helpers apart.
+        return ["caffeinate", "-d", "-i", "-m", "-s"]
     if shutil.which("systemd-inhibit"):
         return ["systemd-inhibit", "--what=idle:sleep", "--who=aaw-core", "--why=agent-session",
                 "sleep", "infinity"]
