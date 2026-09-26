@@ -118,17 +118,20 @@ def test_events_forward_live_with_sequence_numbers_and_replay_from_cursor(relay)
             assert [e["id"] for e in phone.receive_json()["events"]] == ["e2"]
 
 
-def test_push_hook_fires_only_when_no_phone_is_live(relay):
+def test_push_hook_fires_only_when_no_phone_is_live(relay, monkeypatch):
+    monkeypatch.setattr("aaw_core.relay.server.ACK_WAIT_S", 0.3)
     with relay.websocket_connect("/v1/ws") as comp:
         hello_computer(comp)
         register_phone(comp, "ptok")
         with relay.websocket_connect("/v1/ws") as phone:
             hello_phone(phone, "ptok", platform="ios", push_token="apns-123")
             comp.send_json({"type": "event", "project_id": "p", "event": event("e1")})
-            phone.receive_json()
+            got = phone.receive_json()
+            phone.send_json({"type": "ack", "project_id": "p", "seq": got["seq"]})
+            time.sleep(0.6)
         comp.send_json({"type": "ping"})
         assert comp.receive_json() == {"type": "pong"}
-        assert relay.push.calls == []  # a live phone got it directly
+        assert relay.push.calls == []  # a live phone got it and acked it
         comp.send_json({"type": "event", "project_id": "p", "event": event("e2")})
         comp.send_json({"type": "ping"})
         assert comp.receive_json() == {"type": "pong"}
@@ -501,3 +504,22 @@ def test_project_delete_forgets_everything_and_tells_the_other_side(relay):
             assert phone.receive_json()["events"] == []
             phone.send_json({"type": "commands", "req": "r3", "project_id": "p"})
             assert phone.receive_json()["commands"] == []
+
+
+def test_a_live_socket_that_never_acks_is_pushed_anyway(relay, monkeypatch):
+    """The app was killed from the switcher (no clean close) or the network died under it:
+    the socket still accepts a send, so only the missing ack tells the relay to push."""
+    monkeypatch.setattr("aaw_core.relay.server.ACK_WAIT_S", 0.3)
+    with relay.websocket_connect("/v1/ws") as comp:
+        hello_computer(comp)
+        register_phone(comp, "ptok")
+        register_phone(comp, "ptok2")
+        with relay.websocket_connect("/v1/ws") as silent, relay.websocket_connect("/v1/ws") as awake:
+            hello_phone(silent, "ptok", platform="ios", push_token="apns-dead")
+            hello_phone(awake, "ptok2", platform="android", push_token="fcm-live")
+            comp.send_json({"type": "event", "project_id": "p", "event": event("e1")})
+            silent.receive_json()  # delivered at the socket level, never acked
+            got = awake.receive_json()
+            awake.send_json({"type": "ack", "project_id": "p", "seq": got["seq"]})
+            time.sleep(0.8)
+            assert [c["push_token"] for c in relay.push.calls] == ["apns-dead"]

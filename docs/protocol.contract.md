@@ -113,7 +113,8 @@ When no computer socket is live the relay itself answers `{"error": "offline"}`.
 
 ## 8. Push
 
-When an event arrives and no phone socket is live, the relay hands the event to its `PushSender`.
+The relay forwards every event to the live phone sockets, then waits up to 4 s for each phone's `ack`; every registered phone token that did not ack (no socket, a socket left behind by a killed app, a dead network) is handed to the `PushSender`.
+So a phone with the app on screen is never pushed, and a phone that only looks connected is.
 The hosted relay uses `aaw_core/relay/push_fcm.py` (FCM HTTP v1, a service account given as configuration), which sends the same message the hosted product's Cloud Function sends today, so the apps and the iOS Notification Service Extension need no change:
 
 - pushed: every `question`; a `notification` at `success`, `warning`, or `error`; nothing else.

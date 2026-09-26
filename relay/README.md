@@ -26,7 +26,7 @@ Event and command payload shapes, and which fields are encrypted, are the contra
 
 ## Store-and-forward and push
 
-- On a computer `event`: assign a per-`(computer_id, project_id)` monotonic `seq`, persist it (90 days), and forward immediately if a phone has a live socket; otherwise trigger a wake-up push (FCM/APNs, content-free) through the `PushSender` the deployment plugs in.
+- On a computer `event`: assign a per-`(computer_id, project_id)` monotonic `seq`, persist it (90 days), forward it to every live phone socket, then wait up to 4 s for each phone's `ack`. Every registered phone that did not ack (no socket, or a socket left behind by a killed app) gets a wake-up push (FCM/APNs, content-free) through the `PushSender` the deployment plugs in.
 - On phone `subscribe`: replay every event with `seq` greater than the phone's last `ack`, then go live.
 - A `command` is buffered until the computer marks it consumed (30 days at most), and every unconsumed command is replayed to the computer on each connect.
 

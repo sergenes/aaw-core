@@ -99,6 +99,11 @@ CREATE TABLE IF NOT EXISTS computers (computer_id TEXT PRIMARY KEY, doc TEXT NOT
 # The project fields a phone may set; everything else on the document is the computer's.
 PHONE_STATE_FIELDS = {"auto_approve", "pending_message"}
 
+# How long a live phone socket gets to ack an event before the phone is pushed anyway. A
+# socket whose app was killed from the switcher (no clean close) or whose network is gone
+# still accepts a send at the OS level; only the ack proves the phone saw the event.
+ACK_WAIT_S = 4.0
+
 
 class StalePushToken(Exception):
     """The push service no longer knows this token; the relay forgets it."""
@@ -120,6 +125,16 @@ class PushSender(Protocol):
 class NullPushSender:
     async def notify(self, **kwargs) -> None:
         return None
+
+
+@dataclass
+class _AckWaiter:
+    """One forwarded event, until every live phone acks it or the wait runs out."""
+
+    seq: int
+    expected: set[str]
+    acked: set[str] = field(default_factory=set)
+    done: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 @dataclass
@@ -147,6 +162,8 @@ class Relay:
         self.db: aiosqlite.Connection | None = None
         self.write_lock = asyncio.Lock()
         self.live: dict[str, dict[str, Conn]] = {}  # computer_id -> connection id -> Conn
+        self._ack_waiters: dict[tuple[str, str], list[_AckWaiter]] = {}  # (computer, project) -> events in flight
+        self._tasks: set[asyncio.Task] = set()
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
@@ -317,12 +334,36 @@ class Relay:
                 (event["id"], conn.computer_id, project_id, seq, int(event.get("ts", 0)), event.get("type", ""),
                  json.dumps(event.get("payload") or {}), _now_s() + EVENT_TTL_DAYS * 86400))
             await self.db.commit()
-        delivered = await self._forward(conn.computer_id, {"type": "event", "project_id": project_id,
-                                                           "seq": seq, "event": event}, role="phone")
-        if delivered == 0:
+        live_tokens = {c.token for c in self._peers(conn.computer_id, role="phone")}
+        await self._forward(conn.computer_id, {"type": "event", "project_id": project_id,
+                                               "seq": seq, "event": event}, role="phone")
+        if not live_tokens:
             await self._push(conn.computer_id, project_id, event)
+            return
+        task = asyncio.create_task(self._push_unless_acked(conn.computer_id, project_id, seq, event, live_tokens))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
-    async def _push(self, computer_id: str, project_id: str, event: dict) -> None:
+    async def _push_unless_acked(self, computer_id: str, project_id: str, seq: int, event: dict,
+                                 live_tokens: set[str]) -> None:
+        """Wait for the live phones to ack the event; push everyone who did not."""
+        waiter = _AckWaiter(seq=seq, expected=live_tokens)
+        key = (computer_id, project_id)
+        self._ack_waiters.setdefault(key, []).append(waiter)
+        try:
+            await asyncio.wait_for(waiter.done.wait(), ACK_WAIT_S)
+        except TimeoutError:
+            pass
+        finally:
+            waiters = self._ack_waiters.get(key, [])
+            if waiter in waiters:
+                waiters.remove(waiter)
+            if not waiters:
+                self._ack_waiters.pop(key, None)
+        await self._push(computer_id, project_id, event, skip_tokens=waiter.acked)
+
+    async def _push(self, computer_id: str, project_id: str, event: dict,
+                    skip_tokens: set[str] = frozenset()) -> None:
         # A permission question under auto_approve is answered on the computer within a
         # second; waking the phone for it would only ring for nothing. A "choice" question
         # (custom options) always needs a person, so it pushes regardless.
@@ -333,9 +374,11 @@ class Relay:
             if row is not None and json.loads(row["doc"]).get("auto_approve") is True:
                 return
         rows = await self._fetchall(
-            "SELECT push_token, platform FROM devices WHERE computer_id=? AND role='phone' AND push_token<>''",
+            "SELECT token, push_token, platform FROM devices WHERE computer_id=? AND role='phone' AND push_token<>''",
             (computer_id,))
         for r in rows:
+            if r["token"] in skip_tokens:
+                continue  # this phone acked the event: it is on screen
             try:
                 await self.push.notify(push_token=r["push_token"], platform=r["platform"],
                                        computer_id=computer_id, project_id=project_id, event=event)
@@ -435,9 +478,15 @@ class Relay:
     async def _on_ack(self, conn: Conn, frame: dict) -> None:
         if conn.role != "phone":
             return
+        project_id, seq = frame["project_id"], int(frame["seq"])
         await self._exec(
             "INSERT OR REPLACE INTO cursors(token, computer_id, project_id, last_ack_seq) VALUES(?,?,?,?)",
-            (conn.token, conn.computer_id, frame["project_id"], int(frame["seq"])))
+            (conn.token, conn.computer_id, project_id, seq))
+        for waiter in self._ack_waiters.get((conn.computer_id, project_id), []):
+            if waiter.seq <= seq:
+                waiter.acked.add(conn.token)
+                if waiter.expected <= waiter.acked:
+                    waiter.done.set()
 
     async def _on_history(self, conn: Conn, frame: dict) -> None:
         project_id, limit = frame["project_id"], int(frame.get("limit") or 0)
