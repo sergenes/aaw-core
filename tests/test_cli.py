@@ -159,3 +159,14 @@ def test_scheduled_parser_by_id():
     assert a.by_id == "cmd-1" and a.delete is None
     a = p.parse_args(["scheduled", "proj", "new text", "--id", "cmd-1", "--edit", "0", "--at", "+1h"])
     assert (a.by_id, a.edit, a.text) == ("cmd-1", 0, "new text")
+
+
+def test_module_entry_point_runs(tmp_path):
+    """`python -m aaw_core.host.cli` is how an embedding app (the Mac app) drives the host."""
+    import subprocess
+    import sys
+    r = subprocess.run([sys.executable, "-m", "aaw_core.host.cli", "status", "--json"],
+                       env={**__import__("os").environ, "AAW_STATE_DIR": str(tmp_path)},
+                       capture_output=True, text=True, timeout=60, check=False)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["linked"] is False
