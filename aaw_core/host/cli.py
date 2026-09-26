@@ -518,10 +518,18 @@ def cmd_scheduled(a, settings: Settings) -> None:
                 break
             time.sleep(0.1)
         n = a.delete or a.cancel or a.edit
-        if n is not None:
-            if n < 1 or n > len(items):
+        if a.by_id:
+            # Address by command id (a GUI never trusts list positions).
+            item = next((it for it in items if it["id"] == a.by_id), None)
+            if item is None:
+                die(f"no scheduled prompt {a.by_id} for {a.id}")
+            n = items.index(item) + 1
+            if a.edit is None and a.delete is None and a.cancel is None:
+                a.delete = n
+        if n is not None or a.by_id:
+            if a.by_id is None and (n < 1 or n > len(items)):
                 die(f"no scheduled prompt #{n} for {a.id} (have {len(items)})")
-            item = items[n - 1]
+            item = items[n - 1] if a.by_id is None else item
             if a.edit is not None:
                 new_text = a.text or item["text"]
                 try:
@@ -757,6 +765,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--cancel", type=int, metavar="N", help="alias of --delete")
     s.add_argument("--at", metavar="WHEN", help="new time when editing")
     s.add_argument("--json", action="store_true", help="the list as JSON")
+    s.add_argument("--id", dest="by_id", metavar="COMMAND_ID",
+                   help="address one prompt by its id instead of its number (with --edit N or alone to delete)")
     s.set_defaults(fn=cmd_scheduled)
 
     s = sp.add_parser("mobile-mode", help="route permission prompts to the phone")

@@ -33,3 +33,17 @@ def test_replace_removes_stale_documents_and_bad_key_yields_empty(tmp_path):
 def test_read_is_empty_when_nothing_mirrored(tmp_path):
     assert state.read_projects(tmp_path / "missing") == {}
     assert state.read_project(tmp_path / "missing", "x") == {}
+
+
+def test_transport_mirrors_the_scheduled_list(tmp_path):
+    from aaw_core.transport.base import make_command
+    from aaw_core.transport.relay import RelayTransport
+    t = RelayTransport(relay_url="ws://unused", token="t", computer_id="c", project_id="proj",
+                       sessions_dir=tmp_path / "sessions", enc_key=KEY)
+    later = 4_102_444_800_000  # far future
+    doc = make_command("tonight's prompt", KEY, deliver_at=later)
+    t._inbox[doc["id"]] = doc
+    assert t.poll_commands() == []
+    mirrored = state.read_project(tmp_path / "projects", "proj")
+    assert mirrored["scheduled_prompts"] == [{"id": doc["id"], "deliver_at": later, "text": "tonight's prompt"}]
+    assert mirrored["scheduled_count"] == 1

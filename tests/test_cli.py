@@ -140,3 +140,22 @@ def test_parser_json_flags():
     assert p.parse_args(["status", "--json", "--agents"]).agents
     assert p.parse_args(["scheduled", "proj", "--json"]).json
     assert p.parse_args(["models", "--json"]).json
+
+
+def test_identity_honours_a_migrated_computer_id(tmp_path, monkeypatch):
+    from aaw_core.config import Settings
+    from aaw_core.host.identity import load_or_create_identity
+    monkeypatch.setenv("AAW_COMPUTER_ID", "OLD-MAC-ID")
+    settings = Settings(state_dir=tmp_path, relay_url="wss://r", computer_name="mac", keep_awake=False)
+    ident = load_or_create_identity(settings)
+    assert ident.computer_id == "OLD-MAC-ID" and ident.token
+    monkeypatch.setenv("AAW_COMPUTER_ID", "OTHER")
+    assert load_or_create_identity(settings).computer_id == "OLD-MAC-ID"  # persisted, never re-minted
+
+
+def test_scheduled_parser_by_id():
+    p = cli.build_parser()
+    a = p.parse_args(["scheduled", "proj", "--id", "cmd-1"])
+    assert a.by_id == "cmd-1" and a.delete is None
+    a = p.parse_args(["scheduled", "proj", "new text", "--id", "cmd-1", "--edit", "0", "--at", "+1h"])
+    assert (a.by_id, a.edit, a.text) == ("cmd-1", 0, "new text")

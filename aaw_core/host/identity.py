@@ -41,7 +41,9 @@ def load_or_create_identity(settings: Settings) -> HostIdentity:
         return ident
     from aaw_core.transport.relay import new_token  # the socket stack, only when minting
 
-    ident = HostIdentity(computer_id=uuid.uuid4().hex, token=new_token(), computer_name=settings.computer_name)
+    # AAW_COMPUTER_ID: an installer migrating an older setup keeps the id its phones already know.
+    computer_id = os.environ.get("AAW_COMPUTER_ID", "").strip() or uuid.uuid4().hex
+    ident = HostIdentity(computer_id=computer_id, token=new_token(), computer_name=settings.computer_name)
     path = settings.host_file
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

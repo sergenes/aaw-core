@@ -69,6 +69,7 @@ class RelayTransport:
         self._question_id: str | None = None
         self._notif_limiter = RateLimiter(max_events=20, window_seconds=60)
         self._sched_last: tuple | None = None
+        self._sched_list_last: list | None = None
 
         self._lock = threading.Lock()
         self._inbox: dict[str, dict] = {}  # unconsumed commands for this project, by id
@@ -408,6 +409,12 @@ class RelayTransport:
         if sched != self._sched_last:
             self.update_project(scheduled_count=scheduled, next_scheduled_at=next_at or 0)
             self._sched_last = sched
+        # The list itself goes to the local mirror only (never to the relay, which holds the
+        # commands already): a GUI on this machine lists the queue without a socket.
+        listing = self.list_scheduled()
+        if listing != self._sched_list_last:
+            state.merge_project(self._mirror_dir, self.project_id, {"scheduled_prompts": listing})
+            self._sched_list_last = listing
         return deliverable
 
     def mark_command_done(self, command_id: str, ok: bool = True) -> None:
