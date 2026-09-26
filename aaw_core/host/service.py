@@ -99,19 +99,28 @@ def install(settings: Settings) -> list[str]:
     if is_macos():
         if not shutil.which("launchctl"):
             return ["launchctl not found; run `aaw supervisor` yourself"]
-        _run(["launchctl", "bootout", f"{_launchd_target()}/{LAUNCHD_LABEL}"])  # replace a previous one
+        label = f"{_launchd_target()}/{LAUNCHD_LABEL}"
+        _run(["launchctl", "bootout", label])  # replace a previous one
+        # launchd unloads asynchronously: a bootstrap right after the bootout fails with
+        # "Input/output error" while the old definition is still on its way out. Wait for
+        # the label to disappear, then load, retrying for a few seconds.
+        for _ in range(20):
+            if _run(["launchctl", "print", label]).returncode != 0:
+                break
+            time.sleep(0.25)
         path.write_bytes(render_launchd_plist(exe, env, settings.logs_dir))
         out.append(f"wrote {path}")
-        # launchd unloads asynchronously: a bootstrap right after the bootout fails with
-        # "service already loaded" or an I/O error. Retry for a few seconds.
         r = None
-        for _ in range(10):
+        for _ in range(20):
             r = _run(["launchctl", "bootstrap", _launchd_target(), str(path)])
             if r.returncode == 0:
                 break
             time.sleep(0.5)
         if r is None or r.returncode != 0:
-            out.append(f"launchctl bootstrap failed: {((r.stderr or r.stdout) if r else '').strip()}")
+            # The legacy API tolerates the in-between state; try it before giving up.
+            r = _run(["launchctl", "load", "-w", str(path)])
+        if r.returncode != 0:
+            out.append(f"launchctl bootstrap failed: {(r.stderr or r.stdout).strip()}")
         else:
             out.append("supervisor service started (launchd); it starts again at every login")
         return out

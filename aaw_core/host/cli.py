@@ -628,7 +628,10 @@ def cmd_shell_init(a, settings: Settings) -> None:
 def cmd_service(a, settings: Settings) -> None:
     """The supervisor as a login service: systemd --user on Linux, launchd on macOS."""
     if a.action == "install":
-        print("\n".join(service.install(settings)))
+        lines = service.install(settings)
+        print("\n".join(lines))
+        if any("failed" in ln for ln in lines):
+            sys.exit(1)  # a GUI driving this must see the failure
     elif a.action == "uninstall":
         print("\n".join(service.uninstall()))
     elif a.action == "start":
