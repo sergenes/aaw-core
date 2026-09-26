@@ -211,3 +211,30 @@ def test_has_claude_history_encodes_the_path_like_claude(tmp_path, monkeypatch):
 
 def test_strip_ansi():
     assert detect.strip_ansi("\x1b[31mred\x1b[0m \x1b[?25hcursor") == "red cursor"
+
+
+TRUST_PANE = """
+ Accessing workspace:
+ /home/scoot/dev/aaw-test
+ Quick safety check: Is this a project you created or one you trust? (Like your
+ own code, a well-known open source project, or work from your team). If not,
+ take a moment to review what's in this folder first.
+ Claude Code'll be able to read, edit, and execute files here.
+ Security guide
+ ❯ No, exit
+   Yes, I trust this folder
+ Enter to confirm · Esc to cancel
+"""
+
+
+def test_claude_trust_dialog_is_a_dialog_not_an_idle_prompt():
+    d = detect.detect_claude_trust_dialog(TRUST_PANE)
+    assert d["folder"] == "/home/scoot/dev/aaw-test"
+    assert d["options"] == ["Yes, I trust this folder", "No, exit"]
+    assert d["question"].endswith(": /home/scoot/dev/aaw-test")
+    assert detect.detect_idle_prompt(TRUST_PANE) is False
+    assert detect.detect_permission_prompt(TRUST_PANE) is None
+    assert detect.dialog_is_open(TRUST_PANE, "claude") is True
+    assert detect.dialog_is_open(TRUST_PANE, "codex") is False
+    assert detect.detect_claude_trust_dialog("❯ \n") is None
+    assert detect.is_yes_no_shaped(d["options"])

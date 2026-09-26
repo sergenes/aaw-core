@@ -27,7 +27,7 @@ from cryptography.exceptions import InvalidTag
 
 from aaw_core import encryption
 from aaw_core.config import Settings, load_settings
-from aaw_core.hooks.common import desktop_banner, read_key
+from aaw_core.hooks.common import desktop_banner, read_key, set_mobile_mode
 from aaw_core.host import fs, hooks_installer, sessions
 from aaw_core.host.identity import load_identity
 from aaw_core.host.session_id import resolve
@@ -289,6 +289,7 @@ class Supervisor:
 
     def _launch(self, pid: str, path: Path, agent: str, model) -> dict:
         self.log(f"remote start: {pid} ({agent}) at {path}")
+        set_mobile_mode(self.settings)  # phone activity: the session's first prompts go to the phone
         try:
             for line in sessions.start_session(self.settings, path, pid, agent, model=model):
                 self.log(line)

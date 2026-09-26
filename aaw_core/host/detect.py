@@ -269,9 +269,33 @@ def detect_multiselect_prompt(content: str) -> dict | None:
 # ── idle / error / retry states ────────────────────────────────────────────
 
 
+TRUST_YES = "Yes, I trust this folder"
+TRUST_NO = "No, exit"
+
+
+def detect_claude_trust_dialog(pane: str) -> dict | None:
+    """Claude Code's dialog on the first open of a folder ("Is this a project you created
+    or one you trust?"): arrow keys move, Enter confirms, "No, exit" is preselected. A
+    headless start on a fresh folder sits here until someone answers. Returns
+    {question, options, folder, hash} or None."""
+    if TRUST_YES not in pane or "Enter to confirm" not in pane:
+        return None
+    lines = [ln.strip() for ln in pane.split("\n")]
+    folder = ""
+    for i, ln in enumerate(lines):
+        if ln.startswith("Accessing workspace:") and i + 1 < len(lines):
+            folder = lines[i + 1]
+            break
+    where = f" {folder}" if folder else ""
+    question = f"Claude Code asks whether to trust this folder before it reads, edits and runs files there:{where}"
+    return {"question": question, "options": [TRUST_YES, TRUST_NO], "folder": folder,
+            "hash": hashlib.sha1(f"trust:{folder}".encode()).hexdigest()}
+
+
 def detect_idle_prompt(pane: str) -> bool:
-    """Claude is at the ❯ input prompt and not processing (no spinner anywhere)."""
-    if any(c in SPINNERS for c in pane):
+    """Claude is at the ❯ input prompt and not processing (no spinner anywhere). The trust
+    dialog's "❯ No, exit" is a cursor on an option, not the input prompt."""
+    if any(c in SPINNERS for c in pane) or TRUST_YES in pane:
         return False
     tail = [ln.strip() for ln in pane.split("\n") if ln.strip()][-6:]
     return any(ln.startswith("❯") for ln in tail)
@@ -420,5 +444,6 @@ def dialog_is_open(pane: str, agent: str) -> bool:
         detect_permission_prompt(pane)
         or detect_ask_user_question(pane)
         or detect_multiselect_prompt(pane)
+        or (agent == "claude" and detect_claude_trust_dialog(pane))
         or (agent == "cursor" and detect_cursor_native_prompt(pane))
     )

@@ -274,6 +274,9 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
     perm_question_id: str | None = None
     perm_hash: str | None = None
     perm_options: list = []
+    # Claude's "trust this folder" dialog (first open of a folder)
+    trust_question_id: str | None = None
+    trust_hash: str | None = None
     perm_first_seen = 0.0
     # Cursor native prompt state
     cn_question_id: str | None = None
@@ -355,6 +358,24 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
             if alive:
                 pane = tmux.visible_pane(session)
 
+                # ── Claude Code "trust this folder" dialog ─────────────────
+                trust = detect.detect_claude_trust_dialog(pane) if agent == "claude" else None
+                if trust and trust["hash"] != trust_hash:
+                    trust_hash = trust["hash"]
+                    if is_mobile_mode(settings):
+                        trust_question_id = send_question(trust["question"], trust["options"], "permission",
+                                                          "Claude Code trust dialog")
+                        log(f"trust dialog sent to the phone ({trust_question_id[:8]})")
+                    else:
+                        trust_question_id = None
+                        log("trust dialog detected (desktop mode; not forwarding)")
+                elif not trust and trust_hash:
+                    if trust_question_id:
+                        transport.set_project_status("running", pending_question_id="")
+                        log("trust dialog gone (answered on the desktop)")
+                    trust_question_id, trust_hash = None, None
+                    flush_pending_message(transport, session, agent)
+
                 # ── Claude Code permission prompt ──────────────────────────
                 perm = detect.detect_permission_prompt(pane)
                 if perm and perm["hash"] != perm_hash:
@@ -382,6 +403,7 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
                         transport.set_project_status("running", pending_question_id="")
                         log("permission prompt gone (answered on the desktop)")
                     perm_question_id, perm_hash, perm_first_seen, perm_options = None, None, 0.0, []
+                    flush_pending_message(transport, session, agent)  # a message queued behind the prompt
                 elif not perm and not aq_hash and agent == "claude" and now - last_mismatch_warn >= 5.0:
                     if claude_pid is None:
                         claude_pid = resolve_claude_pid(session)
@@ -461,7 +483,8 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
                         ms_hash = None
 
                 # ── idle (Claude and Codex; not scoot, whose REPL is hook-managed) ──
-                if agent != "scoot" and not perm and not perm_hash and not aq_hash and not ms_hash and not cn_hash:
+                if (agent != "scoot" and not perm and not perm_hash and not aq_hash and not ms_hash and not cn_hash
+                        and not trust_hash):
                     if detect.detect_idle_prompt(pane):
                         if idle_since is None:
                             idle_since = now
@@ -569,6 +592,19 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
                     set_mobile_mode(settings)
                     log(f"phone answered {answer!r}: sent key {key!r}")
                     perm_question_id, perm_options = None, []  # perm_hash stays until the pane is clean
+                    flush_pending_message(transport, session, agent)
+
+            if trust_question_id:
+                answer = transport.poll_perm_answer_once(trust_question_id)
+                if answer is not None:
+                    if answer.lower().startswith("yes"):
+                        tmux.send_keys(session, "Down")  # "No, exit" is preselected; move to "Yes"
+                        time.sleep(0.2)
+                    tmux.send_keys(session, "Enter")
+                    transport.set_project_status("running", pending_question_id="")
+                    set_mobile_mode(settings)
+                    log(f"phone answered the trust dialog {answer!r}")
+                    trust_question_id = None  # trust_hash stays until the dialog is gone
                     flush_pending_message(transport, session, agent)
 
             if cn_question_id:
