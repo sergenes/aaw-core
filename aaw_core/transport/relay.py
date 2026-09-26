@@ -30,6 +30,7 @@ from pathlib import Path
 
 import websockets
 
+from aaw_core.host import state
 from aaw_core.transport.base import (
     PUSHABLE_NOTIFICATION_LEVELS,
     LocalLog,
@@ -64,6 +65,7 @@ class RelayTransport:
         self.project_id = project_id
         self._enc_key = enc_key
         self._log = LocalLog(sessions_dir, project_id)
+        self._mirror_dir = state.mirror_dir(sessions_dir.parent)  # <state dir>/projects, for a local GUI
         self._question_id: str | None = None
         self._notif_limiter = RateLimiter(max_events=20, window_seconds=60)
         self._sched_last: tuple | None = None
@@ -268,15 +270,25 @@ class RelayTransport:
 
     def update_project(self, **fields) -> None:
         self._send({"type": "state", "project_id": self.project_id, "fields": fields})
+        state.merge_project(self._mirror_dir, self.project_id, fields, self.decrypt_field)
 
     def set_project_fields(self, project_id: str, fields: dict) -> None:
         """Merge fields into any project's document (the supervisor's reconcile writes)."""
         self._send({"type": "state", "project_id": project_id, "fields": fields})
+        state.merge_project(self._mirror_dir, project_id, fields, self.decrypt_field)
 
     def get_project(self) -> dict:
         """The project document as the relay holds it (status, auto_approve, pending_question_id, ...)."""
         reply = self._request({"type": "project", "project_id": self.project_id})
-        return reply.get("fields") or {}
+        fields = reply.get("fields") or {}
+        if fields:
+            state.merge_project(self._mirror_dir, self.project_id, fields, self.decrypt_field)
+        return fields
+
+    def mirror_projects(self, docs: dict[str, dict]) -> None:
+        """Rewrite the local mirror from a full read (``list_projects``)."""
+        state.replace_projects(self._mirror_dir, {p: d for p, d in docs.items() if not p.startswith("_")},
+                               self.decrypt_field)
 
     def clear_events(self) -> None:
         """Wipe this project's retained feed on the relay (the user ran /clear in the agent)."""

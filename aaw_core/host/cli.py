@@ -32,7 +32,7 @@ from aaw_core import __version__
 from aaw_core.config import HOSTED_RELAY_URL, Settings, load_settings, save_config
 from aaw_core.encryption import load_or_create_key
 from aaw_core.hooks.common import read_key
-from aaw_core.host import hooks_installer, service, sessions
+from aaw_core.host import hooks_installer, service, sessions, state
 from aaw_core.host.identity import load_identity, load_or_create_identity
 from aaw_core.host.session_id import resolve
 from aaw_core.transport.relay import RelayTransport
@@ -127,7 +127,10 @@ def configure_relay(settings: Settings, *, url: str | None = None, ask=input) ->
 
 
 def cmd_link(a, settings: Settings) -> None:
-    if a.relay or not settings.relay_url:
+    if a.json and not a.relay and not settings.relay_url:
+        # Non-interactive (a GUI is asking): the hosted relay unless one was chosen.
+        settings = configure_relay(settings, url=HOSTED_RELAY_URL)
+    elif a.relay or not settings.relay_url:
         settings = configure_relay(settings, url=a.relay)
     settings.state_dir.mkdir(parents=True, exist_ok=True)
     ident = load_or_create_identity(settings)
@@ -140,6 +143,9 @@ def cmd_link(a, settings: Settings) -> None:
     finally:
         t.stop(flush_timeout=0)
     payload = qr_payload(settings, phone_token)
+    if a.json:
+        print(payload)  # the payload only; the caller renders the QR
+        return
     try:
         import qrcode
     except ImportError:
@@ -260,7 +266,43 @@ def cmd_stop(a, settings: Settings) -> None:
     print("\n".join(sessions.stop_session(settings, a.id)))
 
 
+def status_snapshot(settings: Settings) -> dict:
+    """Everything a local GUI shows, in one read: live sessions, the mirrored project
+    documents, and the host's state. Cheap: tmux, pid files, small files."""
+    ident = load_identity(settings)
+    mm = settings.mobile_mode_file.read_text().strip() if settings.mobile_mode_file.exists() else ""
+    try:
+        enabled_at = int(settings.enabled_flag.read_text().strip() or 0)
+    except (OSError, ValueError):
+        enabled_at = 0
+    live = []
+    for s in sessions.list_sessions():
+        pid = sessions.daemon_pid(settings, s.project)
+        live.append({"id": s.project, "agent": sessions.session_agent(s.project) or "", "path": s.path,
+                     "daemon_pid": pid or 0})
+    return {
+        "sessions": live,
+        "projects": state.read_projects(state.mirror_dir(settings.state_dir)),
+        "supervisor": {"enabled": settings.enabled_flag.exists(), "enabled_at": enabled_at,
+                       "fresh": (time.time() - enabled_at) < 180 if enabled_at else False},
+        "mobile_mode": "manual" if mm == "manual" else ("auto" if mm else "off"),
+        "relay_url": settings.relay_url or "",
+        "linked": ident is not None,
+        "computer_id": ident.computer_id if ident else "",
+        "computer_name": ident.computer_name if ident else settings.computer_name,
+        "state_dir": str(settings.state_dir),
+        "version": __version__,
+    }
+
+
 def cmd_status(a, settings: Settings) -> None:
+    if a.json:
+        snap = status_snapshot(settings)
+        if a.agents:
+            snap["detected_agents"] = hooks_installer.detected_agents()
+            snap["scoot_models"] = sessions.scoot_models()
+        print(json.dumps(snap, sort_keys=True))
+        return
     live = sessions.list_sessions()
     print(f"Sessions ({len(live)}):")
     for s in live:
@@ -493,6 +535,9 @@ def cmd_scheduled(a, settings: Settings) -> None:
                 print(f"Deleted #{n}.")
             t.flush()
             return
+        if a.json:
+            print(json.dumps(items, sort_keys=True))
+            return
         if not items:
             print(f"No scheduled prompts for {a.id}.")
             return
@@ -517,6 +562,9 @@ def cmd_mobile_mode(a, settings: Settings) -> None:
 
 def cmd_models(a, settings: Settings) -> None:
     models = sessions.scoot_models()
+    if a.json:
+        print(json.dumps(models if models is not None else None))
+        return
     if models is None:
         die("scoot is not installed (pipx install scootcli)")
     if not models:
@@ -654,6 +702,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = sp.add_parser("link", help="show the QR code to pair a phone (asks which relay to use the first time)")
     s.add_argument("--relay", metavar="URL", help="use this relay (saved to config.json); default: ask once")
     s.add_argument("--show-payload", action="store_true")
+    s.add_argument("--json", action="store_true",
+                   help="print the pairing payload only, no QR (for a GUI; picks the hosted relay when none is set)")
     s.add_argument("--light", action="store_true", help="for a light terminal background")
     s.add_argument("--force", action="store_true", help="print the QR even when the terminal is too narrow")
     s.set_defaults(fn=cmd_link)
@@ -675,7 +725,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("id", nargs="?")
     s.add_argument("--all", action="store_true", help="stop every session")
     s.set_defaults(fn=cmd_stop)
-    sp.add_parser("status", help="sessions, daemons, supervisor, pairing").set_defaults(fn=cmd_status)
+    s = sp.add_parser("status", help="sessions, daemons, supervisor, pairing")
+    s.add_argument("--json", action="store_true", help="machine-readable, with the mirrored project documents")
+    s.add_argument("--agents", action="store_true", help="with --json: also probe the installed agents and models")
+    s.set_defaults(fn=cmd_status)
 
     s = sp.add_parser("feed", help="show a session's conversation (paged; -f to follow, --remote for the relay's copy)")
     s.add_argument("id")
@@ -703,6 +756,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--delete", type=int, metavar="N")
     s.add_argument("--cancel", type=int, metavar="N", help="alias of --delete")
     s.add_argument("--at", metavar="WHEN", help="new time when editing")
+    s.add_argument("--json", action="store_true", help="the list as JSON")
     s.set_defaults(fn=cmd_scheduled)
 
     s = sp.add_parser("mobile-mode", help="route permission prompts to the phone")
@@ -710,6 +764,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_mobile_mode)
     s = sp.add_parser("models", help="list the models scoot can run")
     s.add_argument("--provider", help="only this provider (openai, anthropic, ollama)")
+    s.add_argument("--json", action="store_true", help="the list as JSON (null when scoot is not installed)")
     s.set_defaults(fn=cmd_models)
     sp.add_parser("install-hooks", help="register the hooks with every installed agent").set_defaults(
         fn=cmd_install_hooks)

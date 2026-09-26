@@ -36,6 +36,9 @@ class FakeTransport:
     def set_project_fields(self, project_id, fields):
         self.project_writes.append((project_id, fields))
 
+    def mirror_projects(self, docs):
+        self.mirrored = docs
+
 
 @pytest.fixture
 def sup(tmp_path, monkeypatch):
@@ -181,3 +184,10 @@ def test_waiting_alert_fires_once_per_question(sup, monkeypatch):
     sup.check_waiting_alerts()
     assert banners == ["proj is waiting for your answer"]
     assert Path(sup.settings.state_dir).exists()
+
+
+def test_refresh_cache_mirrors_the_documents_for_a_local_gui(sup):
+    sup.transport.projects = {"proj": {"status": "running", "agent": "codex"}, "_supervisor": {}}
+    sup.refresh_cache()
+    assert sup.transport.mirrored == sup.transport.projects
+    assert sup.cache["proj"]["agent"] == "codex" and "_supervisor" not in sup.cache

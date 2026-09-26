@@ -114,3 +114,29 @@ def test_shell_init_prints_the_functions(capsys, tmp_path, monkeypatch):
     assert cli.main(["shell-init"]) == 0
     out = capsys.readouterr().out
     assert "claude()" in out and "cursor-agent()" in out and "aaw start" in out
+
+
+def test_status_json_reads_the_mirror_and_host_state(tmp_path, monkeypatch, capsys):
+    from aaw_core.config import Settings
+    from aaw_core.host import sessions, state
+    settings = Settings(state_dir=tmp_path, relay_url="wss://r/v1/ws", computer_name="box", keep_awake=False)
+    state.merge_project(state.mirror_dir(tmp_path), "proj", {"status": "running", "agent": "claude"})
+    tmp_path.joinpath("mobile_mode").write_text("manual")
+    monkeypatch.setattr(sessions, "list_sessions", lambda: [sessions.Session(id="aaw-proj", project="proj", path="/p", attached=False)])
+    monkeypatch.setattr(sessions, "session_agent", lambda p: "claude")
+    monkeypatch.setattr(sessions, "daemon_pid", lambda s, p: 4242)
+    a = cli.build_parser().parse_args(["status", "--json"])
+    cli.cmd_status(a, settings)
+    out = json.loads(capsys.readouterr().out)
+    assert out["sessions"] == [{"id": "proj", "agent": "claude", "path": "/p", "daemon_pid": 4242}]
+    assert out["projects"]["proj"]["status"] == "running"
+    assert out["mobile_mode"] == "manual" and out["linked"] is False and out["relay_url"] == "wss://r/v1/ws"
+    assert out["supervisor"] == {"enabled": False, "enabled_at": 0, "fresh": False}
+
+
+def test_parser_json_flags():
+    p = cli.build_parser()
+    assert p.parse_args(["link", "--json"]).json
+    assert p.parse_args(["status", "--json", "--agents"]).agents
+    assert p.parse_args(["scheduled", "proj", "--json"]).json
+    assert p.parse_args(["models", "--json"]).json

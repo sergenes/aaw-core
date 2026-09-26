@@ -130,6 +130,10 @@ class Supervisor:
                   "pending_question_id": d.get("pending_question_id") or ""}
             for pid, d in docs.items() if not pid.startswith("_")
         }
+        try:
+            self.transport.mirror_projects(docs)
+        except Exception as e:  # noqa: BLE001 - the mirror is for a local GUI; never the loop's problem
+            self.log(f"project mirror failed: {e}")
 
     def agent_for(self, project: str) -> str:
         """The live tmux session's own AAW_AGENT is authoritative for what runs in the pane
