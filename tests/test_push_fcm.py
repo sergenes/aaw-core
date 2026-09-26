@@ -26,7 +26,8 @@ def test_ios_question_message_matches_the_hosted_shape():
     assert m["notification"] == {"title": "❓ Codex needs your input", "body": "Tap to view and respond"}
     assert m["data"] == {"computer_id": "c", "project_id": "p", "event_id": "q1", "type": "question",
                          "kind": "permission", "agent": "codex", "encrypted_body": "ENC(q)"}
-    assert m["apns"] == {"payload": {"aps": {"sound": "default", "mutable-content": 1, "category": "PERMISSION_PROMPT"}}}
+    assert m["apns"] == {"headers": {"apns-collapse-id": "q1"},
+                         "payload": {"aps": {"sound": "default", "mutable-content": 1, "category": "PERMISSION_PROMPT"}}}
     assert "android" not in m
 
 

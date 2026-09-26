@@ -102,8 +102,10 @@ def build_message(*, push_token: str, platform: str, computer_id: str, project_i
     if kind == "question" and question_kind != "choice":
         aps["category"] = "PERMISSION_PROMPT"
     body = "Tap to view and respond" if kind == "question" else "Tap to view"
+    # apns-collapse-id: the app posts its own notification for an event it also receives
+    # over the socket, under the event id; iOS then replaces this one instead of stacking.
     return {"token": push_token, "notification": {"title": title, "body": body}, "data": data,
-            "apns": {"payload": {"aps": aps}}}
+            "apns": {"headers": {"apns-collapse-id": data["event_id"]}, "payload": {"aps": aps}}}
 
 
 class FcmPushSender:
