@@ -1,5 +1,7 @@
 """Run the relay: ``python -m aaw_core.relay --host 0.0.0.0 --port 8765 --db relay.sqlite``.
 
+Back it up: ``python -m aaw_core.relay.backup --db relay.sqlite --dir backups --keep 14``.
+
 Configuration is flags or environment (``AAW_RELAY_HOST``, ``AAW_RELAY_PORT``,
 ``AAW_RELAY_DB``, ``AAW_FCM_SERVICE_ACCOUNT``); there are no hosted defaults. Put it
 behind TLS (a reverse proxy that terminates ``wss://``) for anything beyond a local
@@ -10,6 +12,7 @@ test. With a Firebase service-account file the relay wakes phones through FCM
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 
 import uvicorn
@@ -25,6 +28,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--fcm-service-account", default=os.environ.get("AAW_FCM_SERVICE_ACCOUNT") or None,
                    metavar="JSON", help="Firebase service-account file; enables push notifications")
     a = p.parse_args(argv)
+    # One line per pairing event (hello, register, forget) so the store's state can be
+    # followed from the log; uvicorn keeps its own access lines.
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: [%(name)s] %(message)s")
     push: PushSender | None = None
     if a.fcm_service_account:
         from aaw_core.relay.push_fcm import FcmPushSender

@@ -546,3 +546,21 @@ def test_forget_phone_drops_the_token_and_one_push_per_push_token(relay, monkeyp
         with relay.websocket_connect("/v1/ws") as phone:
             phone.send_json({"type": "hello", "role": "phone", "token": "scan2"})
             assert "unknown phone token" in phone.receive_json()["message"]
+
+
+def test_pairing_events_are_logged_one_line_each(relay, caplog):
+    import logging
+    caplog.set_level(logging.INFO, logger="aaw_core.relay")
+    with relay.websocket_connect("/v1/ws") as comp:
+        hello_computer(comp)
+        register_phone(comp, "ptok-logged")
+        with relay.websocket_connect("/v1/ws") as phone:
+            hello_phone(phone, "ptok-logged", platform="android", push_token="fcm-1")
+            phone.send_json({"type": "forget_phone"})
+            assert phone.receive_json()["type"] == "forgotten"
+    messages = [r.getMessage() for r in caplog.records if r.name == "aaw_core.relay"]
+    assert any(m.startswith("computer c1 (") and "registered" in m for m in messages)
+    assert "computer c1 registered phone token ptok-log (QR shown)" in messages
+    assert "phone ptok-log (android, push yes) connected to computer c1" in messages
+    assert "phone ptok-log forgotten by its own request (unlink), computer c1" in messages
+    assert not any("ptok-logged" in m for m in messages)  # never the whole token

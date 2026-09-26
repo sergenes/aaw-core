@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 import time
 import uuid
@@ -68,6 +69,14 @@ from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from aaw_core.transport.base import COMMAND_TTL_DAYS, EVENT_TTL_DAYS
+
+log = logging.getLogger("aaw_core.relay")
+
+
+def _short(token: str) -> str:
+    """The first characters of a token, enough to match rows in the store, never the whole."""
+    return token[:8]
+
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (
@@ -268,18 +277,25 @@ class Relay:
                 await self._exec(
                     "INSERT INTO devices(token, computer_id, role, computer_name, last_seen) VALUES(?,?,?,?,?)",
                     (token, computer_id, "computer", hello.get("computer_name", ""), _now_s()))
+                log.info("computer %s (%s) registered, token %s", computer_id, hello.get("computer_name", ""),
+                         _short(token))
             elif row["computer_id"] != computer_id or row["role"] != "computer":
+                log.warning("computer hello refused: token %s is bound elsewhere", _short(token))
                 await self._error(ws, "token is bound to a different computer")
                 return None
             else:
                 await self._exec("UPDATE devices SET computer_name=?, last_seen=? WHERE token=?",
                                  (hello.get("computer_name", ""), _now_s(), token))
+                log.info("computer %s (%s) connected", computer_id, hello.get("computer_name", ""))
             return Conn(ws=ws, token=token, role="computer", computer_id=computer_id)
         if row is None or row["role"] != "phone":
+            log.warning("phone hello refused: unknown token %s", _short(token))
             await self._error(ws, "unknown phone token; pair with the computer's QR code")
             return None
         await self._exec("UPDATE devices SET platform=?, push_token=?, last_seen=? WHERE token=?",
                          (hello.get("platform", ""), hello.get("push_token", ""), _now_s(), token))
+        log.info("phone %s (%s, push %s) connected to computer %s", _short(token), hello.get("platform") or "?",
+                 "yes" if hello.get("push_token") else "no", row["computer_id"])
         return Conn(ws=ws, token=token, role="phone", computer_id=row["computer_id"])
 
     async def _replay_commands(self, conn: Conn) -> None:
@@ -317,6 +333,7 @@ class Relay:
         await self._exec(
             "INSERT OR REPLACE INTO devices(token, computer_id, role, last_seen) VALUES(?,?,?,?)",
             (token, conn.computer_id, "phone", 0))
+        log.info("computer %s registered phone token %s (QR shown)", conn.computer_id, _short(token))
 
     async def _on_event(self, conn: Conn, frame: dict) -> None:
         if conn.role != "computer":
@@ -434,6 +451,7 @@ class Relay:
             await self.db.execute("DELETE FROM devices WHERE token=?", (conn.token,))
             await self.db.execute("DELETE FROM cursors WHERE token=?", (conn.token,))
             await self.db.commit()
+        log.info("phone %s forgotten by its own request (unlink), computer %s", _short(conn.token), conn.computer_id)
         await conn.send({"type": "forgotten", "req": frame.get("req")})
 
     async def _on_project_delete(self, conn: Conn, frame: dict) -> None:

@@ -30,6 +30,12 @@ Event and command payload shapes, and which fields are encrypted, are the contra
 - On phone `subscribe`: replay every event with `seq` greater than the phone's last `ack`, then go live.
 - A `command` is buffered until the computer marks it consumed (30 days at most), and every unconsumed command is replayed to the computer on each connect.
 
+## Retention, logging, backup
+
+- Events are kept 90 days and commands 30 days (`EVENT_TTL_DAYS`, `COMMAND_TTL_DAYS` in `aaw_core/transport/base.py`); expired rows are deleted when a computer connects. Device tokens stay until the phone unlinks (`forget_phone`) or the computer is re-paired.
+- The relay logs one line per pairing event (computer registered or connected, phone token registered, phone connected, phone forgotten, refused hellos) with the first characters of the token only, so the store's state can be followed from the process log without opening the database.
+- `python -m aaw_core.relay.backup --db relay.sqlite --dir backups --keep 14` takes a consistent copy while the relay runs (SQLite online backup, the store is in WAL mode) and prunes to the newest 14. Run it from cron or a systemd timer; copy the directory off the box. The store holds encrypted events, commands and device tokens: losing it costs replay and re-pairing, never a key.
+
 ## Store schema (SQLite)
 
 ```
