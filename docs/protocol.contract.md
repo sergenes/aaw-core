@@ -98,6 +98,7 @@ Documented in the module docstring of `aaw_core/relay/server.py` and summarized 
 The phone connects with `hello {role: "phone", token, platform?, push_token?}`, `subscribe`s to a session, `ack`s sequence numbers, sends `command` frames, and reads `history`, `commands`, `project`, `projects`, `computer`.
 It may set `auto_approve` and `pending_message` on a project with `state` (other fields are dropped), and forget a session with `project_delete`.
 It never writes events: the computer echoes a delivered prompt and a consumed answer into the feed as `message` events with `role: user`.
+On unlink, or when the user removes the computer, it sends `forget_phone {req}` (answered by `forgotten`): the relay drops that token and its push token, so no push reaches the phone again.
 
 The phone's `request` frames the supervisor answers (`response {req, kind, payload}`):
 

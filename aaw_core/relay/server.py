@@ -16,6 +16,7 @@ Frames are JSON text messages with a ``type``:
     computer         {fields}                                   (computer) computer doc merge
     computer         {req}                                      (phone)    read the computer doc
     project_delete   {project_id}                               (either)   forget a session entirely
+    forget_phone     {req}                                      (phone)    unlink: drop this token and its push token
     command          {project_id, command}                      (either)   new command / prompt / answer
     command_update   {project_id, command_id, fields}           (either)
     command_delete   {project_id, command_id}                   (either)
@@ -35,7 +36,7 @@ Frames are JSON text messages with a ``type``:
     welcome {computer_id}; event {project_id, seq, event}; state; computer; command;
     command_update; command_delete; history {req, project_id, events}; commands {req, project_id, commands};
     project {req, project_id, fields}; projects {req, projects}; computer {req, fields}; clear_events {project_id};
-    project_delete {project_id};
+    project_delete {project_id}; forgotten {req};
     request {req, kind, payload} (to the computer); response {req, kind, payload} (to the phones;
     the relay itself answers {error: "offline"} when no computer socket is live);
     pong; error {message} (then the socket closes)
@@ -299,7 +300,7 @@ class Relay:
             "subscribe": self._on_subscribe, "ack": self._on_ack, "history": self._on_history,
             "commands": self._on_commands, "project": self._on_project, "clear_events": self._on_clear_events,
             "projects": self._on_projects, "request": self._on_request, "response": self._on_response,
-            "project_delete": self._on_project_delete,
+            "project_delete": self._on_project_delete, "forget_phone": self._on_forget_phone,
         }.get(kind)
         if handler is None:
             await conn.send({"type": "error", "message": f"unknown frame type {kind!r}"})
@@ -376,9 +377,13 @@ class Relay:
         rows = await self._fetchall(
             "SELECT token, push_token, platform FROM devices WHERE computer_id=? AND role='phone' AND push_token<>''",
             (computer_id,))
+        pushed: set[str] = set()  # one phone may hold several tokens (one per scan); one push per phone
         for r in rows:
             if r["token"] in skip_tokens:
                 continue  # this phone acked the event: it is on screen
+            if r["push_token"] in pushed:
+                continue
+            pushed.add(r["push_token"])
             try:
                 await self.push.notify(push_token=r["push_token"], platform=r["platform"],
                                        computer_id=computer_id, project_id=project_id, event=event)
@@ -419,6 +424,17 @@ class Relay:
         await self._merge_doc("computers", "computer_id=?", (conn.computer_id,), fields,
                               "INSERT OR REPLACE INTO computers(computer_id, doc) VALUES(?,?)")
         await self._forward(conn.computer_id, {"type": "computer", "fields": fields}, role="phone")
+
+    async def _on_forget_phone(self, conn: Conn, frame: dict) -> None:
+        """The phone unlinked (or removed this computer): forget its token and push token, so
+        no push reaches it again and the token cannot reconnect."""
+        if conn.role != "phone":
+            return
+        async with self.write_lock:
+            await self.db.execute("DELETE FROM devices WHERE token=?", (conn.token,))
+            await self.db.execute("DELETE FROM cursors WHERE token=?", (conn.token,))
+            await self.db.commit()
+        await conn.send({"type": "forgotten", "req": frame.get("req")})
 
     async def _on_project_delete(self, conn: Conn, frame: dict) -> None:
         """Forget a session: its document, feed, commands and cursors (the phone's "remove")."""

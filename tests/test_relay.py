@@ -523,3 +523,26 @@ def test_a_live_socket_that_never_acks_is_pushed_anyway(relay, monkeypatch):
             awake.send_json({"type": "ack", "project_id": "p", "seq": got["seq"]})
             time.sleep(0.8)
             assert [c["push_token"] for c in relay.push.calls] == ["apns-dead"]
+
+
+def test_forget_phone_drops_the_token_and_one_push_per_push_token(relay, monkeypatch):
+    monkeypatch.setattr("aaw_core.relay.server.ACK_WAIT_S", 0.2)
+    with relay.websocket_connect("/v1/ws") as comp:
+        hello_computer(comp)
+        register_phone(comp, "scan1")
+        register_phone(comp, "scan2")  # a re-scan on the same phone: two tokens, one push token
+        for token in ("scan1", "scan2"):
+            with relay.websocket_connect("/v1/ws") as phone:
+                hello_phone(phone, token, platform="ios", push_token="apns-same")
+        comp.send_json({"type": "event", "project_id": "p", "event": event("e1")})
+        comp.send_json({"type": "ping"})
+        assert comp.receive_json() == {"type": "pong"}
+        assert [c["push_token"] for c in relay.push.calls] == ["apns-same"]  # not twice
+
+        with relay.websocket_connect("/v1/ws") as phone:
+            hello_phone(phone, "scan2")
+            phone.send_json({"type": "forget_phone", "req": "r1"})
+            assert phone.receive_json() == {"type": "forgotten", "req": "r1"}
+        with relay.websocket_connect("/v1/ws") as phone:
+            phone.send_json({"type": "hello", "role": "phone", "token": "scan2"})
+            assert "unknown phone token" in phone.receive_json()["message"]
