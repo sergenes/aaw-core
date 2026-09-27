@@ -170,3 +170,15 @@ def test_module_entry_point_runs(tmp_path):
                        capture_output=True, text=True, timeout=60, check=False)
     assert r.returncode == 0, r.stderr
     assert json.loads(r.stdout)["linked"] is False
+
+
+def test_link_json_prints_only_the_payload(tmp_path, monkeypatch, capsys):
+    """A GUI reads stdout as the payload; the first link on a fresh install must not add lines."""
+    from aaw_core.config import Settings
+    settings = Settings(state_dir=tmp_path, relay_url=None, computer_name="box", keep_awake=False)
+    monkeypatch.setattr(cli, "_transport", lambda s, p: type("T", (), {
+        "register_phone_token": lambda self: "tok", "flush": lambda self, t: True, "stop": lambda self, **k: None})())
+    a = cli.build_parser().parse_args(["link", "--json"])
+    cli.cmd_link(a, settings)
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) == 1 and json.loads(out[0])["token"] == "tok"

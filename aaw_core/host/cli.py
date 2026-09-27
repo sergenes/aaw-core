@@ -102,7 +102,7 @@ def qr_payload(settings: Settings, phone_token: str) -> str:
                       sort_keys=True, separators=(",", ":"))
 
 
-def configure_relay(settings: Settings, *, url: str | None = None, ask=input) -> Settings:
+def configure_relay(settings: Settings, *, url: str | None = None, ask=input, quiet: bool = False) -> Settings:
     """Pick the relay this computer uses and save it to config.json. With no `url`, ask:
     the hosted relay (free, notifications work) or the user's own."""
     if url is None:
@@ -122,14 +122,16 @@ def configure_relay(settings: Settings, *, url: str | None = None, ask=input) ->
     if not url.startswith(("wss://", "ws://")):
         die(f"a relay URL starts with wss:// (ws:// only for a LAN test): {url!r}")
     path = save_config(settings.state_dir, relay_url=url)
-    print(f"Relay saved to {path}: {url}")
+    if not quiet:
+        print(f"Relay saved to {path}: {url}")
     return load_settings()
 
 
 def cmd_link(a, settings: Settings) -> None:
     if a.json and not a.relay and not settings.relay_url:
-        # Non-interactive (a GUI is asking): the hosted relay unless one was chosen.
-        settings = configure_relay(settings, url=HOSTED_RELAY_URL)
+        # Non-interactive (a GUI is asking): the hosted relay unless one was chosen. Quiet:
+        # with --json the payload is the whole of stdout.
+        settings = configure_relay(settings, url=HOSTED_RELAY_URL, quiet=True)
     elif a.relay or not settings.relay_url:
         settings = configure_relay(settings, url=a.relay)
     settings.state_dir.mkdir(parents=True, exist_ok=True)
