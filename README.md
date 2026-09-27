@@ -30,10 +30,21 @@ your computer                                          your phone
 
 ## Quickstart (once released)
 
+On Linux, one command installs or updates everything (its own virtualenv, the `aaw` command,
+the shell integration, linking with your phone, the service), and removes the earlier
+Agents At Work Linux host if it finds one:
+
 ```bash
-pipx install aaw-core                      # Linux or macOS, Python 3.11+
+curl -fsSL https://agentsatwork.app/install-linux.sh | bash    # the same as scripts/install.sh here
+```
+
+Or by hand, on Linux or macOS:
+
+```bash
+pipx install aaw-core                      # Python 3.11+
 aaw link                                   # asks which relay (ours, free, or your own), prints a QR code to scan
 aaw service install                        # the always-on part, started at every login (or: aaw supervisor)
+aaw shell-integration on                   # typing claude, codex, ... in a folder starts a bridged session
 cd ~/my-project && claude                  # start an agent as you normally would
 aaw status                                 # see it bridged; approve from your phone
 ```
