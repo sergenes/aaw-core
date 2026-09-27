@@ -730,7 +730,7 @@ def build_parser() -> argparse.ArgumentParser:
 
             settings: environment variables or ~/.aaw/config.json
               AAW_RELAY_URL / relay_url              wss://... the relay this computer and the phone meet at
-              AAW_COMPUTER_NAME / computer_name      the name shown on the phone (default: hostname)
+              AAW_COMPUTER_NAME / computer_name      the name shown on the phone (default: the Computer Name)
               AAW_BROWSE_ROOTS / browse_roots        folders the phone may browse and start sessions in (default ~)
               AAW_KEEP_AWAKE / keep_awake            keep the computer awake while a session runs (default true)
               AAW_LOCAL_NOTIFICATIONS                desktop banners (default true)

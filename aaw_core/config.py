@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,6 +23,25 @@ DEFAULT_STATE_DIR = Path.home() / ".aaw"
 # The relay we host for free users. A public endpoint, not a secret, and never a
 # silent default: `aaw link` offers it and writes the choice to config.json.
 HOSTED_RELAY_URL = "wss://relay.agentsatwork.app/v1/ws"
+
+
+def default_computer_name() -> str:
+    """The name a person knows this computer by.
+
+    On macOS that is the Computer Name from System Settings ("Sergey's MacBook Pro"),
+    not the network hostname ("Sergeys-MacBook-Pro.local"). Elsewhere the hostname,
+    without a trailing ".local".
+    """
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.run(["scutil", "--get", "ComputerName"], capture_output=True, text=True,
+                                 timeout=2).stdout.strip()
+            if out:
+                return out
+        except (OSError, subprocess.SubprocessError):
+            pass
+    name = os.uname().nodename
+    return name[: -len(".local")] if name.endswith(".local") else name
 
 
 def _config_file(state_dir: Path) -> dict:
@@ -122,7 +143,7 @@ def load_settings() -> Settings:
     return Settings(
         state_dir=state_dir,
         relay_url=pick("AAW_RELAY_URL", "relay_url", None),
-        computer_name=pick("AAW_COMPUTER_NAME", "computer_name", os.uname().nodename),
+        computer_name=pick("AAW_COMPUTER_NAME", "computer_name", None) or default_computer_name(),
         keep_awake=flag("AAW_KEEP_AWAKE", "keep_awake", "true"),
         browse_roots=tuple(str(r) for r in roots) or ("~",),
         local_notifications=flag("AAW_LOCAL_NOTIFICATIONS", "local_notifications", "true"),

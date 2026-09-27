@@ -31,7 +31,9 @@ def load_identity(settings: Settings) -> HostIdentity | None:
         return None
     if not d.get("computer_id") or not d.get("token"):
         return None
-    return HostIdentity(d["computer_id"], d["token"], d.get("computer_name") or settings.computer_name)
+    # The name is resolved on every load, not pinned at setup: renaming the computer (or
+    # setting computer_name) reaches the phones with the next update.
+    return HostIdentity(d["computer_id"], d["token"], settings.computer_name)
 
 
 def load_or_create_identity(settings: Settings) -> HostIdentity:
