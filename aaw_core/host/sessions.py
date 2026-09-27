@@ -321,7 +321,8 @@ def start_session(settings: Settings, project_dir: Path, project: str, agent: st
     if not shutil.which("tmux"):
         raise SessionError("tmux is not installed (brew install tmux / apt install tmux)")
     if not settings.enabled_flag.exists():
-        raise SessionError("the host is off; start the supervisor first (aaw supervisor, or the service)")
+        from aaw_core.host import service
+        raise SessionError(f"the host is off: {service.start_hint()}")
     session = tmux_session(project)
     out = [start_keep_awake(settings)]
     if tmux.has_session(session):

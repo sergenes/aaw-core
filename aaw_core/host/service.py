@@ -134,8 +134,30 @@ def install(settings: Settings) -> list[str]:
         out.append(f"systemctl enable failed: {(r.stderr or r.stdout).strip()}")
     else:
         out.append(f"supervisor service started (systemd --user); status: systemctl --user status {SYSTEMD_UNIT}")
-        out.append("to keep it running after logout on a server: loginctl enable-linger $USER")
+        if linger_off():
+            out.append("note: it stops when you log out (lingering is off for your user). To keep it running "
+                       "on a server: sudo loginctl enable-linger $USER")
     return out
+
+
+def linger_off() -> bool:
+    """True when systemd stops this user's services at logout (Linux, lingering off)."""
+    if is_macos() or not shutil.which("loginctl"):
+        return False
+    r = _run(["loginctl", "show-user", os.environ.get("USER") or str(os.getuid()), "-p", "Linger"])
+    return r.returncode == 0 and r.stdout.strip() == "Linger=no"
+
+
+def is_running() -> bool:
+    return status().startswith(("installed, running", "installed, active"))
+
+
+def start_hint() -> str:
+    """What to run when the supervisor is not running, for the messages that need it."""
+    if unit_path().exists():
+        return "start it with `aaw service start`"
+    return ("run `aaw service install` once (it runs in the background and starts at every login), "
+            "or `aaw supervisor` in another terminal")
 
 
 def stop() -> str:

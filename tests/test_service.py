@@ -46,3 +46,20 @@ def test_status_and_uninstall_without_a_unit(monkeypatch, tmp_path):
     assert service.status() == "not installed"
     monkeypatch.setattr(service.shutil, "which", lambda name: None)
     assert service.uninstall() == ["  no systemctl; nothing to stop"]
+
+
+def test_start_hint_names_the_service_to_install_or_start(monkeypatch, tmp_path):
+    unit = tmp_path / "aaw-supervisor.service"
+    monkeypatch.setattr(service, "unit_path", lambda: unit)
+    assert "aaw service install" in service.start_hint()
+    unit.write_text("[Unit]")
+    assert "aaw service start" in service.start_hint()
+
+
+def test_linger_off_reads_loginctl(monkeypatch):
+    import subprocess
+    monkeypatch.setattr(service, "is_macos", lambda: False)
+    monkeypatch.setattr(service.shutil, "which", lambda name: "/usr/bin/" + name)
+    for answer, off in (("Linger=no\n", True), ("Linger=yes\n", False)):
+        monkeypatch.setattr(service, "_run", lambda args, a=answer: subprocess.CompletedProcess(args, 0, stdout=a))
+        assert service.linger_off() is off

@@ -167,7 +167,11 @@ def cmd_link(a, settings: Settings) -> None:
     qr.print_ascii(invert=not a.light)
     print("\nScan with the Agents At Work app (Computers, then the QR icon). Each `aaw link` mints a new phone token;"
           " earlier ones keep working.")
-    print("Then: aaw start ~/your/project")
+    if service.is_running():
+        print("Then: aaw start ~/your/project")
+    else:
+        print("Then: aaw service install     # the always-on part: runs in the background, starts at every login")
+        print("      aaw start ~/your/project")
     if a.show_payload:
         print(payload)
 
