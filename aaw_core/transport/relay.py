@@ -321,6 +321,13 @@ class RelayTransport:
         stored, entry = make_event(event_type, payload, self._enc_key)
         self._log.append(entry)  # local log first: the feed must work even if the relay is down
         self._send({"type": "event", "project_id": self.project_id, "event": stored})
+        if event_type == "notification" and payload.get("level") in PUSHABLE_NOTIFICATION_LEVELS:
+            # The same alerts the phone is pushed, for a desktop GUI that polls the mirror:
+            # the summary alone is not enough, "waiting for your input" overwrites it a
+            # second later and reads the same after every turn.
+            state.merge_project(self._mirror_dir, self.project_id, {"last_alert": {
+                "id": stored["id"], "ts": stored.get("ts", 0), "level": payload.get("level"),
+                "message": payload.get("message", "")}})
         return stored["id"]
 
     def read_events(self, limit: int | None = 2000) -> list:

@@ -47,3 +47,14 @@ def test_transport_mirrors_the_scheduled_list(tmp_path):
     mirrored = state.read_project(tmp_path / "projects", "proj")
     assert mirrored["scheduled_prompts"] == [{"id": doc["id"], "deliver_at": later, "text": "tonight's prompt"}]
     assert mirrored["scheduled_count"] == 1
+
+
+def test_transport_mirrors_pushable_alerts(tmp_path):
+    from aaw_core.transport.relay import RelayTransport
+    t = RelayTransport(relay_url="ws://unused", token="t", computer_id="c", project_id="proj",
+                       sessions_dir=tmp_path / "sessions", enc_key=KEY)
+    t.write_event("notification", {"message": "Claude is waiting for your input", "level": "info"})
+    assert "last_alert" not in state.read_project(tmp_path / "projects", "proj")
+    eid = t.write_event("notification", {"message": "Response ready: done", "level": "success"})
+    alert = state.read_project(tmp_path / "projects", "proj")["last_alert"]
+    assert alert["id"] == eid and alert["level"] == "success" and alert["message"] == "Response ready: done"
