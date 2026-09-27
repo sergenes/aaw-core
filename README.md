@@ -38,6 +38,10 @@ cd ~/my-project && claude                  # start an agent as you normally woul
 aaw status                                 # see it bridged; approve from your phone
 ```
 
+## Desktop notifications
+
+The phone is the primary channel, and the computer itself also gets a banner when a turn finishes, an error happens, or the agent waits for input: `osascript` on macOS, `notify-send` on a Linux desktop (GNOME, KDE, and the rest). A server or a box without a desktop simply has no `notify-send` and shows nothing. Two keys in `~/.aaw/config.json`: `local_notifications` (default `true`; a GUI that shows its own banners turns it off) and `waiting_alert_seconds` (default `0`, off; the seconds a question may sit unanswered before a "waiting for your answer" banner, for when the push is muted while you are at the desk).
+
 ## Supported agents
 
 Claude Code, Codex CLI, Gemini CLI, Grok CLI, Cursor, and [Scoot](https://github.com/sergenes/scootcli) (local models with Ollama, plus cloud models). Not affiliated with Anthropic, OpenAI, Google, xAI, Anysphere, or Ollama.
