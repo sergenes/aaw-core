@@ -35,13 +35,13 @@ def default_computer_name() -> str:
     if sys.platform == "darwin":
         try:
             out = subprocess.run(["scutil", "--get", "ComputerName"], capture_output=True, text=True,
-                                 timeout=2).stdout.strip()
+                                 timeout=2, check=False).stdout.strip()
             if out:
                 return out
         except (OSError, subprocess.SubprocessError):
             pass
     name = os.uname().nodename
-    return name[: -len(".local")] if name.endswith(".local") else name
+    return name.removesuffix(".local")
 
 
 def _config_file(state_dir: Path) -> dict:
