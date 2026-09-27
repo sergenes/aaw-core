@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aaw-core"
-version = "0.0.1"
+dynamic = ["version"]
 description = "Agents At Work Core: the open-source engine behind Agents At Work. Run Claude Code, Codex, Gemini CLI, Grok, Cursor, and Scoot on your own Mac or Linux box and control them from your phone."
 readme = "README.md"
 license = "MIT"
@@ -12,7 +12,7 @@ requires-python = ">=3.11"
 authors = [{ name = "Sergey Nes" }]
 keywords = ["ai-agents", "claude-code", "codex", "gemini-cli", "remote-control", "tmux"]
 classifiers = [
-  "Development Status :: 2 - Pre-Alpha",
+  "Development Status :: 3 - Alpha",
   "Environment :: Console",
   "Intended Audience :: Developers",
   "License :: OSI Approved :: MIT License",
@@ -21,6 +21,7 @@ classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Software Development",
 ]
 dependencies = [
@@ -38,8 +39,13 @@ dev = ["pytest>=8", "ruff>=0.5", "httpx2"]  # httpx2: Starlette's TestClient for
 aaw = "aaw_core.host.cli:main"
 
 [project.urls]
-Homepage = "https://www.agentsatwork.app"
+Homepage = "https://agentsatwork.app"
 Repository = "https://github.com/sergenes/aaw-core"
+Issues = "https://github.com/sergenes/aaw-core/issues"
+Changelog = "https://github.com/sergenes/aaw-core/releases"
+
+[tool.hatch.version]
+path = "aaw_core/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["aaw_core"]

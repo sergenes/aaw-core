@@ -41,4 +41,4 @@ Changes to these paths are reviewed more slowly and carefully, because they affe
 
 ## How this project is developed
 
-The engine is developed here, in the open. It was assembled by porting the host from the maintainer's private product, and it is the intended engine for that product going forward, so good contributions here reach both.
+The engine is developed here, in the open. It was assembled by porting the host from the maintainer's product, Agents At Work, and it is now the engine that product runs: the Mac app bundles it, and the hosted relay is this relay. Good contributions here reach both.
