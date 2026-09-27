@@ -305,3 +305,15 @@ def test_scoot_model_prefers_env_then_newest_session_file(monkeypatch, tmp_path)
     assert on_session_start.scoot_model() == "openai/gpt"
     (state / "sessions" / "b.json").write_text(json.dumps({"root": "/elsewhere", "model": "other"}))
     assert on_session_start.scoot_model() == "openai/gpt"  # another folder's session is ignored
+
+
+def test_notify_honours_local_notifications_off(tmp_path, monkeypatch):
+    from aaw_core.config import Settings
+    from aaw_core.hooks import common
+    shown = []
+    monkeypatch.setattr(common, "desktop_banner", lambda title, msg: shown.append(msg))
+    on = Settings(state_dir=tmp_path, relay_url=None, computer_name="x", keep_awake=False, local_notifications=True)
+    off = Settings(state_dir=tmp_path, relay_url=None, computer_name="x", keep_awake=False, local_notifications=False)
+    common.notify(None, "Response ready", "success", settings=on)
+    common.notify(None, "Response ready", "success", settings=off)
+    assert shown == ["\u2705 Response ready"] or len(shown) == 1

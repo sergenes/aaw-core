@@ -177,11 +177,15 @@ def desktop_banner(title: str, message: str) -> None:
 
 
 def notify(transport: RelayTransport | None, message: str, level: str = "info", *,
-           project: str = "", agent: str = "") -> None:
+           project: str = "", agent: str = "", settings: Settings | None = None) -> None:
     """A notification event on the feed (a push on the phone for success/warning/error)
-    plus a desktop banner. Replaces the old notify.py subprocess."""
+    plus a desktop banner, unless ``local_notifications`` is off in the config (a GUI that
+    shows its own banners turns it off). Replaces the old notify.py subprocess."""
     if transport is not None:
         transport.write_notification(message, level)
+    settings = settings or load_settings()
+    if not settings.local_notifications:
+        return
     header = " / ".join(p for p in (project, agent) if p)
     title = f"[{header}] Agents At Work" if header else "Agents At Work"
     desktop_banner(title, f"{LEVEL_EMOJI.get(level, LEVEL_EMOJI['info'])} {message}")
