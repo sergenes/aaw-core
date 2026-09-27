@@ -61,6 +61,11 @@ def event(event_id="e1", content="hi"):
     return {"id": event_id, "type": "message", "ts": 1, "payload": {"role": "user", "content": content}}
 
 
+def alert(event_id="n1"):
+    """An event that pushes (a "Response ready" notification); a message never does."""
+    return {"id": event_id, "type": "notification", "ts": 1, "payload": {"level": "success", "message": "enc"}}
+
+
 # ── server unit tests ───────────────────────────────────────────────────────
 
 
@@ -125,20 +130,67 @@ def test_push_hook_fires_only_when_no_phone_is_live(relay, monkeypatch):
         register_phone(comp, "ptok")
         with relay.websocket_connect("/v1/ws") as phone:
             hello_phone(phone, "ptok", platform="ios", push_token="apns-123")
-            comp.send_json({"type": "event", "project_id": "p", "event": event("e1")})
+            comp.send_json({"type": "event", "project_id": "p", "event": alert("e1")})
             got = phone.receive_json()
             phone.send_json({"type": "ack", "project_id": "p", "seq": got["seq"]})
             time.sleep(0.6)
         comp.send_json({"type": "ping"})
         assert comp.receive_json() == {"type": "pong"}
         assert relay.push.calls == []  # a live phone got it and acked it
-        comp.send_json({"type": "event", "project_id": "p", "event": event("e2")})
+        comp.send_json({"type": "event", "project_id": "p", "event": alert("e2")})
         comp.send_json({"type": "ping"})
         assert comp.receive_json() == {"type": "pong"}
     assert len(relay.push.calls) == 1
     call = relay.push.calls[0]
     assert call["push_token"] == "apns-123" and call["platform"] == "ios"
     assert call["computer_id"] == "c1" and call["project_id"] == "p" and call["event"]["id"] == "e2"
+
+
+def test_a_phone_on_screen_is_not_pushed_through_its_older_pairing(relay, monkeypatch):
+    """A phone that scanned twice holds two tokens with one push token; an ack on either
+    one means the phone has the event on screen."""
+    monkeypatch.setattr("aaw_core.relay.server.ACK_WAIT_S", 0.3)
+    with relay.websocket_connect("/v1/ws") as comp:
+        hello_computer(comp)
+        register_phone(comp, "old-scan")
+        register_phone(comp, "new-scan")
+        with relay.websocket_connect("/v1/ws") as phone:
+            hello_phone(phone, "old-scan", platform="ios", push_token="apns-same")
+        with relay.websocket_connect("/v1/ws") as phone:
+            hello_phone(phone, "new-scan", platform="ios", push_token="apns-same")
+            comp.send_json({"type": "event", "project_id": "p", "event": alert("n1")})
+            got = phone.receive_json()
+            phone.send_json({"type": "ack", "project_id": "p", "seq": got["seq"]})
+            time.sleep(0.6)
+    assert relay.push.calls == []
+
+
+def test_a_message_never_pushes(relay):
+    with relay.websocket_connect("/v1/ws") as comp:
+        hello_computer(comp)
+        register_phone(comp, "ptok")
+        with relay.websocket_connect("/v1/ws") as phone:
+            hello_phone(phone, "ptok", platform="ios", push_token="apns-123")
+        comp.send_json({"type": "event", "project_id": "p", "event": event("e1")})
+        comp.send_json({"type": "ping"})
+        assert comp.receive_json() == {"type": "pong"}
+    assert relay.push.calls == []
+
+
+def test_a_hello_without_a_push_token_keeps_the_stored_one(relay, monkeypatch):
+    """An app connects before its push token is ready; the phone must stay reachable."""
+    monkeypatch.setattr("aaw_core.relay.server.ACK_WAIT_S", 0.3)
+    with relay.websocket_connect("/v1/ws") as comp:
+        hello_computer(comp)
+        register_phone(comp, "ptok")
+        with relay.websocket_connect("/v1/ws") as phone:
+            hello_phone(phone, "ptok", platform="ios", push_token="apns-123")
+        with relay.websocket_connect("/v1/ws") as phone:
+            hello_phone(phone, "ptok", platform="ios")  # a relaunch, the push token not ready yet
+        comp.send_json({"type": "event", "project_id": "p", "event": alert("e1")})
+        comp.send_json({"type": "ping"})
+        assert comp.receive_json() == {"type": "pong"}
+    assert [c["push_token"] for c in relay.push.calls] == ["apns-123"]
 
 
 def test_commands_replay_to_computer_until_consumed(relay):
@@ -455,8 +507,8 @@ def test_a_stale_push_token_is_forgotten(tmp_path):
         register_phone(comp)
         with client.websocket_connect("/v1/ws") as phone:
             hello_phone(phone, "ptok", platform="ios", push_token="apns-old")
-        comp.send_json({"type": "event", "project_id": "p", "event": event("e1")})
-        comp.send_json({"type": "event", "project_id": "p", "event": event("e2")})
+        comp.send_json({"type": "event", "project_id": "p", "event": alert("e1")})
+        comp.send_json({"type": "event", "project_id": "p", "event": alert("e2")})
         comp.send_json({"type": "ping"})
         assert comp.receive_json() == {"type": "pong"}
     assert push.calls == 1  # the second event found no token left to push to
@@ -517,7 +569,7 @@ def test_a_live_socket_that_never_acks_is_pushed_anyway(relay, monkeypatch):
         with relay.websocket_connect("/v1/ws") as silent, relay.websocket_connect("/v1/ws") as awake:
             hello_phone(silent, "ptok", platform="ios", push_token="apns-dead")
             hello_phone(awake, "ptok2", platform="android", push_token="fcm-live")
-            comp.send_json({"type": "event", "project_id": "p", "event": event("e1")})
+            comp.send_json({"type": "event", "project_id": "p", "event": alert("e1")})
             silent.receive_json()  # delivered at the socket level, never acked
             got = awake.receive_json()
             awake.send_json({"type": "ack", "project_id": "p", "seq": got["seq"]})
@@ -534,7 +586,7 @@ def test_forget_phone_drops_the_token_and_one_push_per_push_token(relay, monkeyp
         for token in ("scan1", "scan2"):
             with relay.websocket_connect("/v1/ws") as phone:
                 hello_phone(phone, token, platform="ios", push_token="apns-same")
-        comp.send_json({"type": "event", "project_id": "p", "event": event("e1")})
+        comp.send_json({"type": "event", "project_id": "p", "event": alert("e1")})
         comp.send_json({"type": "ping"})
         assert comp.receive_json() == {"type": "pong"}
         assert [c["push_token"] for c in relay.push.calls] == ["apns-same"]  # not twice

@@ -31,10 +31,9 @@ from pathlib import Path
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
-from aaw_core.relay.server import StalePushToken
+from aaw_core.relay.server import StalePushToken, pushes
 
 FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging"
-PUSHABLE_LEVELS = {"success", "error", "warning"}
 # FCM caps the data payload near 4 KB; the other fields cost a few hundred bytes. A
 # ciphertext is never truncated (that breaks its authentication): over budget it is sent
 # empty and the phone opens the app to read the event by id.
@@ -69,16 +68,11 @@ def build_message(*, push_token: str, platform: str, computer_id: str, project_i
     plus mutable-content so the extension decrypts the real text, and the Yes/No
     approval category for permission questions. Android gets data only, so its
     handler runs even when the app is killed."""
+    if not pushes(event):
+        return None
     kind = event.get("type", "")
     payload = event.get("payload") or {}
-    if kind == "question":
-        encrypted = payload.get("question") or ""
-    elif kind == "notification":
-        if payload.get("level") not in PUSHABLE_LEVELS:
-            return None
-        encrypted = payload.get("message") or ""
-    else:
-        return None
+    encrypted = (payload.get("question") if kind == "question" else payload.get("message")) or ""
     if len(encrypted.encode()) > ENCRYPTED_BODY_BUDGET:
         encrypted = ""
     question_kind = payload.get("kind") or "permission"

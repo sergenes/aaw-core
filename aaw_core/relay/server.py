@@ -115,6 +115,18 @@ PHONE_STATE_FIELDS = {"auto_approve", "pending_message"}
 ACK_WAIT_S = 4.0
 
 
+PUSHABLE_LEVELS = frozenset({"success", "error", "warning"})
+
+
+def pushes(event: dict) -> bool:
+    """Whether an event wakes a phone: questions always, notifications at success, error and
+    warning, nothing else (messages and prompts only fill the feed)."""
+    kind = event.get("type")
+    if kind == "question":
+        return True
+    return kind == "notification" and (event.get("payload") or {}).get("level") in PUSHABLE_LEVELS
+
+
 class StalePushToken(Exception):
     """The push service no longer knows this token; the relay forgets it."""
 
@@ -292,10 +304,22 @@ class Relay:
             log.warning("phone hello refused: unknown token %s", _short(token))
             await self._error(ws, "unknown phone token; pair with the computer's QR code")
             return None
-        await self._exec("UPDATE devices SET platform=?, push_token=?, last_seen=? WHERE token=?",
-                         (hello.get("platform", ""), hello.get("push_token", ""), _now_s(), token))
+        # A hello without a push token keeps the stored one: an app often connects before its
+        # push token is ready, and wiping it would leave the phone unreachable once it goes to
+        # the background. A push token is dropped only on unlink (forget_phone) or when the
+        # push service reports it dead.
+        push_token = hello.get("push_token") or ""
+        if push_token:
+            await self._exec("UPDATE devices SET platform=?, push_token=?, last_seen=? WHERE token=?",
+                             (hello.get("platform", ""), push_token, _now_s(), token))
+            push_state = "yes"
+        else:
+            await self._exec("UPDATE devices SET platform=?, last_seen=? WHERE token=?",
+                             (hello.get("platform", ""), _now_s(), token))
+            kept = await self._fetchone("SELECT push_token FROM devices WHERE token=?", (token,))
+            push_state = "kept" if kept and kept["push_token"] else "no"
         log.info("phone %s (%s, push %s) connected to computer %s", _short(token), hello.get("platform") or "?",
-                 "yes" if hello.get("push_token") else "no", row["computer_id"])
+                 push_state, row["computer_id"])
         return Conn(ws=ws, token=token, role="phone", computer_id=row["computer_id"])
 
     async def _replay_commands(self, conn: Conn) -> None:
@@ -355,6 +379,8 @@ class Relay:
         live_tokens = {c.token for c in self._peers(conn.computer_id, role="phone")}
         await self._forward(conn.computer_id, {"type": "event", "project_id": project_id,
                                                "seq": seq, "event": event}, role="phone")
+        if not pushes(event):
+            return
         if not live_tokens:
             await self._push(conn.computer_id, project_id, event)
             return
@@ -394,16 +420,24 @@ class Relay:
         rows = await self._fetchall(
             "SELECT token, push_token, platform FROM devices WHERE computer_id=? AND role='phone' AND push_token<>''",
             (computer_id,))
-        pushed: set[str] = set()  # one phone may hold several tokens (one per scan); one push per phone
+        # One phone may hold several tokens (one per scan), all with its one push token: one
+        # push per phone, and none at all when any of its tokens acked the event on screen.
+        on_screen = {r["push_token"] for r in rows if r["token"] in skip_tokens}
+        pushed: set[str] = set()
+        what = f"{event.get('type', '')} {payload.get('level') or payload.get('kind') or ''}".strip()
         for r in rows:
-            if r["token"] in skip_tokens:
-                continue  # this phone acked the event: it is on screen
+            if r["token"] in skip_tokens or r["push_token"] in on_screen:
+                # this phone acked the event: it is on screen
+                log.info("push skipped for phone %s (acked on screen): %s in %s", _short(r["token"]), what, project_id)
+                continue
             if r["push_token"] in pushed:
                 continue
             pushed.add(r["push_token"])
             try:
                 await self.push.notify(push_token=r["push_token"], platform=r["platform"],
                                        computer_id=computer_id, project_id=project_id, event=event)
+                log.info("push sent to phone %s (%s): %s in %s", _short(r["token"]), r["platform"] or "?",
+                         what, project_id)
             except StalePushToken as stale:
                 await self._exec("UPDATE devices SET push_token='' WHERE push_token=?", (stale.push_token,))
                 print("[relay] push token no longer registered; forgotten", file=sys.stderr, flush=True)
