@@ -40,7 +40,7 @@ aaw status                                 # see it bridged; approve from your p
 
 ## Desktop notifications
 
-The phone is the primary channel, and the computer itself also gets a banner when a turn finishes, an error happens, or the agent waits for input: `osascript` on macOS, `notify-send` on a Linux desktop (GNOME, KDE, and the rest). A server or a box without a desktop simply has no `notify-send` and shows nothing. Two keys in `~/.aaw/config.json`: `local_notifications` (default `true`; a GUI that shows its own banners turns it off) and `waiting_alert_seconds` (default `0`, off; the seconds a question may sit unanswered before a "waiting for your answer" banner, for when the push is muted while you are at the desk).
+The phone is the primary channel, and the computer itself also gets a banner when a turn finishes, an error happens, or the agent waits for input: `osascript` on macOS, `notify-send` on a Linux desktop (GNOME, KDE, and the rest). A server or a box without a desktop simply has no `notify-send` and shows nothing. On macOS, while any Focus is on (Do Not Disturb included), banners from scripts go to Notification Center silently unless Agents At Work is allowed under System Settings > Focus > Allowed Apps; `aaw status` reminds you. Two keys in `~/.aaw/config.json`: `local_notifications` (default `true`; a GUI that shows its own banners turns it off) and `waiting_alert_seconds` (default `0`, off; the seconds a question may sit unanswered before a "waiting for your answer" banner, for when the push is muted while you are at the desk).
 
 ## Supported agents
 

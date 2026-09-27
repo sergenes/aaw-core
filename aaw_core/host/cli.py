@@ -284,6 +284,11 @@ def _write_stopped(settings: Settings, project: str) -> None:
         t.stop(flush_timeout=0)
 
 
+# macOS delivers a script's banner to Notification Center only, silently, while any Focus
+# (including Do Not Disturb) is on, unless the app is allowed in that Focus.
+FOCUS_HINT = "; with a Focus on, allow Agents At Work under System Settings > Focus > Allowed Apps"
+
+
 def status_snapshot(settings: Settings) -> dict:
     """Everything a local GUI shows, in one read: live sessions, the mirrored project
     documents, and the host's state. Cheap: tmux, pid files, small files."""
@@ -332,6 +337,8 @@ def cmd_status(a, settings: Settings) -> None:
     print(f"Supervisor: {'running (enabled flag present)' if settings.enabled_flag.exists() else 'not running'}")
     print(f"Mobile mode: {'on (manual)' if mm == 'manual' else ('on (recent phone activity)' if mm else 'off')}")
     print(f"Relay: {settings.relay_url or 'not configured (AAW_RELAY_URL)'}")
+    print(f"Desktop banners: {'on' if settings.local_notifications else 'off (local_notifications)'}"
+          + (FOCUS_HINT if settings.local_notifications and sys.platform == "darwin" else ""))
     print(f"Linked: {'yes, computer ' + ident.computer_id[:8] + '...' if ident else 'no (aaw link)'}; "
           f"session key: {'yes' if settings.session_key_file.exists() else 'no'}")
     sm = sessions.scoot_models()
@@ -632,6 +639,8 @@ def cmd_service(a, settings: Settings) -> None:
         print("\n".join(lines))
         if any("failed" in ln for ln in lines):
             sys.exit(1)  # a GUI driving this must see the failure
+        if sys.platform == "darwin" and settings.local_notifications:
+            print("Desktop banners: on" + FOCUS_HINT)
     elif a.action == "uninstall":
         print("\n".join(service.uninstall()))
     elif a.action == "start":
