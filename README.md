@@ -60,6 +60,10 @@ aaw shell-integration on                   # typing claude, codex, ... in a fold
 
 Then start an agent the way you always do (`cd ~/my-project && claude`), or start one from the phone.
 
+Coming from the earlier Agents At Work Linux tool by hand: its `aaw uninstall` leaves its `~/.local/bin/aaw` launcher behind, and pipx will not replace a file it does not own, so `aaw` keeps running the old launcher ("run_python.sh: No such file or directory").
+Remove it first with `rm ~/.local/bin/aaw`, then `pipx install --force aaw-core`.
+The one-line installer handles this for you.
+
 ## Everyday commands
 
 ```bash
