@@ -80,6 +80,20 @@ aaw uninstall                       # remove the service, the hooks, the shell l
 
 `aaw --help` lists every command, and `aaw <command> --help` its options.
 
+## Running on a laptop
+
+A sleeping computer cannot run agents or reach the phone.
+While a session runs, the engine stops the computer from sleeping on its own when idle (`caffeinate` on macOS, `systemd-inhibit` on Linux), but it cannot overrule a closed lid.
+A MacBook on battery always sleeps when the lid closes, and most Linux laptops suspend on lid close whatever inhibitors are held.
+While it sleeps, the phone shows the computer as offline, and a message sent during one of its short background wakes may not reach the agent: the phone says so, and you can send it again once the computer is awake.
+
+To keep agents working while you are away from the laptop:
+
+- Leave the lid open. Turn the brightness down if you like: the computer keeps running.
+- On a Mac, use closed-display mode: connect power and an external display (plus a keyboard and mouse), then close the lid.
+- On a Mac that must run with the lid closed and no display, `sudo pmset -a disablesleep 1` turns sleep off completely, on battery too, and `sudo pmset -a disablesleep 0` turns it back on. Remember to turn it back on: a Mac that cannot sleep drains its battery and gets hot in a bag.
+- On a Linux laptop, set `HandleLidSwitch=ignore` and `HandleLidSwitchExternalPower=ignore` in `/etc/systemd/logind.conf` and reboot. Some desktops (GNOME, KDE) have their own lid setting that also has to allow it.
+
 ## Hosting the relay yourself
 
 The relay is a small server in this repository (`aaw_core/relay/`): run it with `docker compose` from `relay/`, or with `pip install "aaw-core[relay]"` and `python -m aaw_core.relay`, behind a TLS proxy.
