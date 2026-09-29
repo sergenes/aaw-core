@@ -3,6 +3,7 @@ integration over uvicorn, with the phone simulated by the sync websocket client.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import socket
 import threading
@@ -76,7 +77,7 @@ def test_computer_token_is_trust_on_first_use_then_bound(relay):
         assert hello_computer(ws, computer_id="c1")["type"] == "welcome"  # same binding: fine
     with relay.websocket_connect("/v1/ws") as ws:
         err = hello_computer(ws, computer_id="other")  # same token, other computer: refused
-        assert err["type"] == "error" and "bound" in err["message"]
+        assert err["type"] == "error" and err["message"] == "unauthorized"
 
 
 def test_phone_needs_a_registered_token(relay):
@@ -616,3 +617,153 @@ def test_pairing_events_are_logged_one_line_each(relay, caplog):
     assert "phone ptok-log (android, push yes) connected to computer c1" in messages
     assert "phone ptok-log forgotten by its own request (unlink), computer c1" in messages
     assert not any("ptok-logged" in m for m in messages)  # never the whole token
+
+
+# ── abuse limits ─────────────────────────────────────────────────────────────
+
+
+def _drain_ws(ws):
+    """Receive frames until the server closes the socket; returns them."""
+    frames = []
+    with contextlib.suppress(Exception):  # closed mid-iteration; the shape varies by transport
+        while True:
+            frames.append(ws.receive_json())
+    return frames
+
+
+def test_hello_rejects_oversized_fields(relay):
+    from aaw_core.relay import server
+
+    with relay.websocket_connect("/v1/ws") as ws:
+        ws.send_json({"type": "hello", "role": "computer",
+                      "token": "t" * (server.MAX_FIELD_LEN["token"] + 1), "computer_id": "c1"})
+        err = ws.receive_json()
+        assert err["type"] == "error" and "role and token" in err["message"]
+    with relay.websocket_connect("/v1/ws") as ws:
+        ws.send_json({"type": "hello", "role": "computer", "token": "tok", "computer_id": "c1",
+                      "computer_name": "n" * (server.MAX_FIELD_LEN["computer_name"] + 1)})
+        err = ws.receive_json()
+        assert err["type"] == "error" and err["message"] == "invalid hello"
+
+
+def test_fresh_token_cannot_claim_a_live_computer(relay):
+    with relay.websocket_connect("/v1/ws") as owner:
+        hello_computer(owner, token="ctok", computer_id="c1")
+        with relay.websocket_connect("/v1/ws") as thief:
+            err = hello_computer(thief, token="fresh", computer_id="c1")
+            assert err["type"] == "error" and err["message"] == "unauthorized"
+
+
+def test_fresh_token_cannot_claim_a_recently_seen_computer(relay):
+    with relay.websocket_connect("/v1/ws") as owner:
+        hello_computer(owner, token="ctok", computer_id="c1")
+    with relay.websocket_connect("/v1/ws") as thief:  # owner offline, but seen seconds ago
+        err = hello_computer(thief, token="fresh", computer_id="c1")
+        assert err["type"] == "error" and err["message"] == "unauthorized"
+
+
+def test_fresh_token_claims_a_long_idle_computer(relay, monkeypatch):
+    from aaw_core.relay import server
+
+    with relay.websocket_connect("/v1/ws") as owner:
+        hello_computer(owner, token="ctok", computer_id="c1")
+    monkeypatch.setattr(server, "REBIND_IDLE_DAYS", -1)  # every offline token counts as long idle
+    with relay.websocket_connect("/v1/ws") as reinstalled:
+        assert hello_computer(reinstalled, token="fresh", computer_id="c1")["type"] == "welcome"
+    monkeypatch.setattr(server, "REBIND_IDLE_DAYS", 30)  # back to normal: fresh is recent now
+    with relay.websocket_connect("/v1/ws") as old:  # the replaced token is gone for good
+        err = hello_computer(old, token="ctok", computer_id="c1")
+        assert err["type"] == "error" and err["message"] == "unauthorized"
+
+
+def test_history_row_cap(relay, monkeypatch):
+    from aaw_core.relay import server
+
+    monkeypatch.setattr(server, "HISTORY_MAX_EVENTS", 3)
+    with relay.websocket_connect("/v1/ws") as comp:
+        hello_computer(comp)
+        for i in range(5):
+            comp.send_json({"type": "event", "project_id": "p", "event": event(f"e{i}")})
+        comp.send_json({"type": "history", "req": "r1", "project_id": "p"})
+        got = comp.receive_json()
+        assert got["type"] == "history"
+        assert [e["id"] for e in got["events"]] == ["e2", "e3", "e4"]  # the newest, oldest first
+
+
+def test_history_byte_budget_drops_the_oldest(relay, monkeypatch):
+    from aaw_core.relay import server
+
+    monkeypatch.setattr(server, "HISTORY_MAX_BYTES", 90)
+    with relay.websocket_connect("/v1/ws") as comp:
+        hello_computer(comp)
+        for i in range(4):
+            comp.send_json({"type": "event", "project_id": "p", "event": event(f"e{i}", content="x" * 10)})
+        comp.send_json({"type": "history", "req": "r1", "project_id": "p", "limit": 10})
+        got = comp.receive_json()
+        assert got["events"], "the newest event always fits"
+        assert [e["id"] for e in got["events"]][-1] == "e3"
+        assert len(got["events"]) < 4
+
+
+def test_stored_bytes_quota_refuses_events(relay, monkeypatch):
+    from aaw_core.relay import server
+
+    monkeypatch.setattr(server, "STORED_BYTES_MAX", 80)
+    with relay.websocket_connect("/v1/ws") as comp:
+        hello_computer(comp)
+        comp.send_json({"type": "event", "project_id": "p", "event": event("e1", content="x" * 20)})
+        comp.send_json({"type": "event", "project_id": "p", "event": event("e2", content="x" * 20)})
+        err = comp.receive_json()
+        assert err == {"type": "error", "message": "storage quota exceeded"}
+        comp.send_json({"type": "history", "req": "r1", "project_id": "p"})
+        assert [e["id"] for e in comp.receive_json()["events"]] == ["e1"]
+        # clearing the feed frees the quota
+        comp.send_json({"type": "clear_events", "project_id": "p"})
+        comp.send_json({"type": "event", "project_id": "p", "event": event("e3", content="x" * 20)})
+        comp.send_json({"type": "history", "req": "r2", "project_id": "p"})
+        assert [e["id"] for e in comp.receive_json()["events"]] == ["e3"]
+
+
+def test_push_budget_per_computer(relay, monkeypatch):
+    from aaw_core.relay import server
+
+    monkeypatch.setattr(server, "PUSHES_PER_MINUTE", 1)
+    with relay.websocket_connect("/v1/ws") as comp:
+        hello_computer(comp)
+        register_phone(comp, "ptok")
+    with relay.websocket_connect("/v1/ws") as phone:
+        hello_phone(phone, "ptok", push_token="fcm1", platform="ios")
+    with relay.websocket_connect("/v1/ws") as comp:
+        hello_computer(comp)
+        comp.send_json({"type": "event", "project_id": "p", "event": alert("n1")})
+        comp.send_json({"type": "event", "project_id": "p", "event": alert("n2")})
+        comp.send_json({"type": "ping"})
+        assert comp.receive_json() == {"type": "pong"}
+    deadline = time.time() + 2.0
+    while len(relay.push.calls) < 1 and time.time() < deadline:
+        time.sleep(0.05)
+    time.sleep(0.3)  # a second push would have landed by now
+    assert len(relay.push.calls) == 1
+
+
+def test_frame_budget_closes_the_connection(relay, monkeypatch):
+    from aaw_core.relay import server
+
+    monkeypatch.setattr(server, "FRAMES_PER_MINUTE", 5)
+    with relay.websocket_connect("/v1/ws") as comp:
+        hello_computer(comp)
+        for _ in range(10):
+            comp.send_json({"type": "ping"})
+        frames = _drain_ws(comp)
+        assert {"type": "error", "message": "rate limited"} in frames
+        assert sum(1 for f in frames if f == {"type": "pong"}) <= 5
+
+
+def test_hello_deadline_closes_silent_sockets(relay, monkeypatch):
+    from aaw_core.relay import server
+
+    monkeypatch.setattr(server, "HELLO_TIMEOUT_S", 0.2)
+    with relay.websocket_connect("/v1/ws") as ws:
+        time.sleep(0.6)
+        frames = _drain_ws(ws)
+        assert {"type": "error", "message": "hello timeout"} in frames

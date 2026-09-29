@@ -17,7 +17,7 @@ import os
 
 import uvicorn
 
-from aaw_core.relay.server import PushSender, create_app
+from aaw_core.relay.server import WS_MAX_SIZE, PushSender, create_app
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -36,7 +36,7 @@ def main(argv: list[str] | None = None) -> int:
         from aaw_core.relay.push_fcm import FcmPushSender
         push = FcmPushSender(a.fcm_service_account)
         print(f"[relay] pushes enabled through FCM project {push.project_id}", flush=True)
-    uvicorn.run(create_app(a.db, push), host=a.host, port=a.port, log_level="info")
+    uvicorn.run(create_app(a.db, push), host=a.host, port=a.port, log_level="info", ws_max_size=WS_MAX_SIZE)
     return 0
 
 
