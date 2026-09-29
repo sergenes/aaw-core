@@ -47,7 +47,14 @@ phone learns at once when it is not. Everything else is stored and forwarded.
 Trust model: a computer token is registered on first use (trust on first use) and
 is bound to its computer_id forever; a phone token must have been registered by
 that computer (it rides in the QR code). Tokens are routing credentials only; the
-encryption key never reaches the relay.
+encryption key never reaches the relay. A computer_id whose token is live or was
+seen recently cannot be claimed by a new token; only an id idle beyond
+``REBIND_IDLE_DAYS`` (a wiped reinstall) may rebind.
+
+Abuse limits (the ``Abuse limits`` constants): incoming frames are capped in size
+and per-connection rate, a socket must say hello within a deadline, history
+responses are capped in rows and bytes, each computer has a stored-bytes quota
+and a push budget, and registrations and sockets are budgeted per client address.
 """
 
 from __future__ import annotations
@@ -68,7 +75,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from aaw_core.transport.base import COMMAND_TTL_DAYS, EVENT_TTL_DAYS
+from aaw_core.transport.base import COMMAND_TTL_DAYS, EVENT_TTL_DAYS, RateLimiter
 
 log = logging.getLogger("aaw_core.relay")
 
@@ -108,6 +115,31 @@ CREATE TABLE IF NOT EXISTS computers (computer_id TEXT PRIMARY KEY, doc TEXT NOT
 
 # The project fields a phone may set; everything else on the document is the computer's.
 PHONE_STATE_FIELDS = {"auto_approve", "pending_message"}
+
+# ── Abuse limits ─────────────────────────────────────────────────────────────
+# The relay is internet-facing and registration is trust on first use, so every limit
+# here bounds what one client can cost: memory (frame size, history), disk (stored
+# bytes), FCM quota (pushes), and sockets (per-address caps). Generous for real use.
+WS_MAX_SIZE = 1024 * 1024            # largest incoming frame; passed to uvicorn by __main__
+HELLO_TIMEOUT_S = 10.0               # a socket must say hello within this or is closed
+HISTORY_MAX_EVENTS = 1000            # hard cap on one history response, whatever the client asks
+HISTORY_MAX_BYTES = 8 * 1024 * 1024  # and on its payload bytes (newest events win)
+FRAMES_PER_MINUTE = 1200             # per-connection budget for incoming frames
+STORED_BYTES_MAX = 64 * 1024 * 1024  # event payload bytes retained per computer
+PUSHES_PER_MINUTE = 20               # per computer, mirroring the client-side contract
+REGISTRATIONS_PER_HOUR = 10          # new computer tokens per client address
+CONNECTIONS_PER_ADDR = 40            # concurrent sockets per client address
+REBIND_IDLE_DAYS = 30                # a new token may claim a computer_id only this long after
+                                     # its old token was last seen (a wiped reinstall), never live
+MAX_FIELD_LEN = {"token": 128, "phone_token": 128, "computer_id": 64, "computer_name": 200,
+                 "platform": 32, "push_token": 512, "project_id": 256, "event_id": 128}
+
+
+def _bad_str(value, kind: str, *, required: bool = True) -> bool:
+    """True when a client-supplied identifier is missing, not a string, or too long."""
+    if value is None or value == "":
+        return required
+    return not isinstance(value, str) or len(value) > MAX_FIELD_LEN[kind]
 
 # How long a live phone socket gets to ack an event before the phone is pushed anyway. A
 # socket whose app was killed from the switcher (no clean close) or whose network is gone
@@ -167,6 +199,7 @@ class Conn:
     computer_id: str
     id: str = field(default_factory=lambda: uuid.uuid4().hex)  # one token may hold several sockets
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    frames: RateLimiter = field(default_factory=lambda: RateLimiter(FRAMES_PER_MINUTE, 60))
 
     async def send(self, frame: dict) -> None:
         async with self.send_lock:
@@ -186,6 +219,10 @@ class Relay:
         self.live: dict[str, dict[str, Conn]] = {}  # computer_id -> connection id -> Conn
         self._ack_waiters: dict[tuple[str, str], list[_AckWaiter]] = {}  # (computer, project) -> events in flight
         self._tasks: set[asyncio.Task] = set()
+        self._conns_per_addr: dict[str, int] = {}
+        self._reg_limiters: dict[str, RateLimiter] = {}    # client address -> new-computer budget
+        self._push_limiters: dict[str, RateLimiter] = {}   # computer_id -> push budget
+        self._stored_bytes: dict[str, int] = {}            # computer_id -> cached SUM(payload)
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
@@ -235,15 +272,39 @@ class Relay:
         now = _now_s()
         await self._exec("DELETE FROM events WHERE expires_at < ?", (now,))
         await self._exec("DELETE FROM commands WHERE expires_at < ?", (now,))
+        self._stored_bytes.clear()
+
+    @staticmethod
+    def _client_addr(ws: WebSocket) -> str:
+        """The client address as nginx saw it (X-Forwarded-For), else the socket peer."""
+        forwarded = ws.headers.get("x-forwarded-for", "")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+        return ws.client.host if ws.client else "?"
+
+    async def _stored_for(self, computer_id: str) -> int:
+        cached = self._stored_bytes.get(computer_id)
+        if cached is None:
+            row = await self._fetchone(
+                "SELECT COALESCE(SUM(LENGTH(payload)), 0) AS n FROM events WHERE computer_id=?", (computer_id,))
+            cached = int(row["n"])
+            self._stored_bytes[computer_id] = cached
+        return cached
 
     # ── connection handling ───────────────────────────────────────────────────
 
     async def handle(self, ws: WebSocket) -> None:
         await ws.accept()
+        addr = self._client_addr(ws)
+        if self._conns_per_addr.get(addr, 0) >= CONNECTIONS_PER_ADDR:
+            log.warning("connection refused: %s holds too many sockets", addr)
+            await self._error(ws, "too many connections")
+            return
+        self._conns_per_addr[addr] = self._conns_per_addr.get(addr, 0) + 1
         conn: Conn | None = None
         try:
-            hello = json.loads(await ws.receive_text())
-            conn = await self._hello(ws, hello)
+            hello = json.loads(await asyncio.wait_for(ws.receive_text(), HELLO_TIMEOUT_S))
+            conn = await self._hello(ws, hello, addr)
             if conn is None:
                 return
             self.live.setdefault(conn.computer_id, {})[conn.id] = conn
@@ -253,12 +314,24 @@ class Relay:
                 await self._replay_commands(conn)
             while True:
                 frame = json.loads(await ws.receive_text())
+                if not conn.frames.allow():
+                    log.warning("connection closed: %s %s over the frame budget", conn.role, conn.computer_id)
+                    await self._error(ws, "rate limited")
+                    return
                 await self._dispatch(conn, frame)
+        except TimeoutError:
+            await self._error(ws, "hello timeout")
         except WebSocketDisconnect:
             pass
         except (ValueError, KeyError, TypeError) as e:
-            await self._error(ws, f"bad frame: {e}")
+            log.warning("bad frame from %s: %r", addr, e)
+            await self._error(ws, "bad frame")
         finally:
+            count = self._conns_per_addr.get(addr, 1) - 1
+            if count > 0:
+                self._conns_per_addr[addr] = count
+            else:
+                self._conns_per_addr.pop(addr, None)
             if conn is not None:
                 self.live.get(conn.computer_id, {}).pop(conn.id, None)
                 await self._exec("UPDATE devices SET last_seen=? WHERE token=?", (_now_s(), conn.token))
@@ -270,21 +343,31 @@ class Relay:
         except (WebSocketDisconnect, RuntimeError, OSError):
             pass
 
-    async def _hello(self, ws: WebSocket, hello: dict) -> Conn | None:
+    async def _hello(self, ws: WebSocket, hello: dict, addr: str) -> Conn | None:
         if hello.get("type") != "hello":
             await self._error(ws, "expected hello")
             return None
         role, token = hello.get("role"), hello.get("token")
-        if role not in ("computer", "phone") or not token:
+        if role not in ("computer", "phone") or _bad_str(token, "token"):
             await self._error(ws, "hello needs role and token")
+            return None
+        if (_bad_str(hello.get("computer_name"), "computer_name", required=False)
+                or _bad_str(hello.get("platform"), "platform", required=False)
+                or _bad_str(hello.get("push_token"), "push_token", required=False)):
+            await self._error(ws, "invalid hello")
             return None
         row = await self._fetchone("SELECT computer_id, role FROM devices WHERE token=?", (token,))
         if role == "computer":
             computer_id = hello.get("computer_id")
-            if not computer_id:
+            if _bad_str(computer_id, "computer_id"):
                 await self._error(ws, "computer hello needs computer_id")
                 return None
             if row is None:
+                refused = await self._refuse_registration(computer_id, addr)
+                if refused:
+                    log.warning("computer hello refused (%s): %s from %s", refused, computer_id, addr)
+                    await self._error(ws, "unauthorized")
+                    return None
                 # Trust on first use: the token binds to this computer_id from now on.
                 await self._exec(
                     "INSERT INTO devices(token, computer_id, role, computer_name, last_seen) VALUES(?,?,?,?,?)",
@@ -293,7 +376,7 @@ class Relay:
                          _short(token))
             elif row["computer_id"] != computer_id or row["role"] != "computer":
                 log.warning("computer hello refused: token %s is bound elsewhere", _short(token))
-                await self._error(ws, "token is bound to a different computer")
+                await self._error(ws, "unauthorized")
                 return None
             else:
                 await self._exec("UPDATE devices SET computer_name=?, last_seen=? WHERE token=?",
@@ -321,6 +404,32 @@ class Relay:
         log.info("phone %s (%s, push %s) connected to computer %s", _short(token), hello.get("platform") or "?",
                  push_state, row["computer_id"])
         return Conn(ws=ws, token=token, role="phone", computer_id=row["computer_id"])
+
+    async def _refuse_registration(self, computer_id: str, addr: str) -> str:
+        """Why a fresh token may not register this computer_id, or "" when it may.
+
+        A computer_id that is live or was recently seen belongs to its current token: a new
+        token for it would be a takeover, since the id travels in the QR code and in push
+        payloads. A reinstall wipes token and id together, so the only honest rebind is an
+        id whose old token has been idle for a long time. New registrations are also
+        budgeted per client address, so registration spam cannot grow the store."""
+        limiter = self._reg_limiters.setdefault(addr, RateLimiter(REGISTRATIONS_PER_HOUR, 3600))
+        if len(self._reg_limiters) > 10_000:  # a bounded map, not a leak
+            self._reg_limiters.clear()
+        if not limiter.allow():
+            return "registration budget"
+        holder = await self._fetchone(
+            "SELECT token, last_seen FROM devices WHERE computer_id=? AND role='computer'", (computer_id,))
+        if holder is None:
+            return ""
+        if any(c.role == "computer" for c in self.live.get(computer_id, {}).values()):
+            return "computer_id is live under another token"
+        if holder["last_seen"] > _now_s() - REBIND_IDLE_DAYS * 86400:
+            return "computer_id recently seen under another token"
+        await self._exec("DELETE FROM devices WHERE token=?", (holder["token"],))
+        log.info("computer %s rebound: old token %s idle beyond %d days",
+                 computer_id, _short(holder["token"]), REBIND_IDLE_DAYS)
+        return ""
 
     async def _replay_commands(self, conn: Conn) -> None:
         rows = await self._fetchall(
@@ -354,6 +463,9 @@ class Relay:
         if conn.role != "computer":
             return
         token = frame["phone_token"]
+        if _bad_str(token, "phone_token"):
+            await conn.send({"type": "error", "message": "invalid phone token"})
+            return
         await self._exec(
             "INSERT OR REPLACE INTO devices(token, computer_id, role, last_seen) VALUES(?,?,?,?)",
             (token, conn.computer_id, "phone", 0))
@@ -363,6 +475,20 @@ class Relay:
         if conn.role != "computer":
             return
         project_id, event = frame["project_id"], frame["event"]
+        if _bad_str(project_id, "project_id") or _bad_str(event.get("id"), "event_id"):
+            await conn.send({"type": "error", "message": "invalid event"})
+            return
+        payload_json = json.dumps(event.get("payload") or {})
+        stored = await self._stored_for(conn.computer_id)
+        if stored + len(payload_json) > STORED_BYTES_MAX:
+            # The cache only grows between cleanups; recount before actually refusing.
+            self._stored_bytes.pop(conn.computer_id, None)
+            stored = await self._stored_for(conn.computer_id)
+            if stored + len(payload_json) > STORED_BYTES_MAX:
+                log.warning("event refused: computer %s is over its storage quota", conn.computer_id)
+                await conn.send({"type": "error", "message": "storage quota exceeded"})
+                return
+        self._stored_bytes[conn.computer_id] = stored + len(payload_json)
         async with self.write_lock:
             row = await self._fetchone("SELECT last_seq FROM seqs WHERE computer_id=? AND project_id=?",
                                        (conn.computer_id, project_id))
@@ -374,7 +500,7 @@ class Relay:
                 "INSERT OR REPLACE INTO events(id, computer_id, project_id, seq, ts, type, payload, expires_at)"
                 " VALUES(?,?,?,?,?,?,?,?)",
                 (event["id"], conn.computer_id, project_id, seq, int(event.get("ts", 0)), event.get("type", ""),
-                 json.dumps(event.get("payload") or {}), _now_s() + EVENT_TTL_DAYS * 86400))
+                 payload_json, _now_s() + EVENT_TTL_DAYS * 86400))
             await self.db.commit()
         live_tokens = {c.token for c in self._peers(conn.computer_id, role="phone")}
         await self._forward(conn.computer_id, {"type": "event", "project_id": project_id,
@@ -417,6 +543,10 @@ class Relay:
                                        (computer_id, project_id))
             if row is not None and json.loads(row["doc"]).get("auto_approve") is True:
                 return
+        limiter = self._push_limiters.setdefault(computer_id, RateLimiter(PUSHES_PER_MINUTE, 60))
+        if not limiter.allow():
+            log.warning("push suppressed for computer %s: over the push budget", computer_id)
+            return
         rows = await self._fetchall(
             "SELECT token, push_token, platform FROM devices WHERE computer_id=? AND role='phone' AND push_token<>''",
             (computer_id,))
@@ -496,6 +626,7 @@ class Relay:
                 await self.db.execute(f"DELETE FROM {table} WHERE computer_id=? AND project_id=?",
                                       (conn.computer_id, project_id))
             await self.db.commit()
+        self._stored_bytes.pop(conn.computer_id, None)
         await self._forward(conn.computer_id, {"type": "project_delete", "project_id": project_id}, exclude=conn.id)
 
     async def _on_command(self, conn: Conn, frame: dict) -> None:
@@ -558,16 +689,21 @@ class Relay:
 
     async def _on_history(self, conn: Conn, frame: dict) -> None:
         project_id, limit = frame["project_id"], int(frame.get("limit") or 0)
-        sql = "SELECT id, ts, type, payload FROM events WHERE computer_id=? AND project_id=? ORDER BY seq DESC"
-        params: tuple = (conn.computer_id, project_id)
-        if limit > 0:
-            sql += " LIMIT ?"
-            params = (*params, limit)
-        rows = list(await self._fetchall(sql, params))
-        rows.reverse()
+        limit = HISTORY_MAX_EVENTS if limit <= 0 else min(limit, HISTORY_MAX_EVENTS)
+        rows = await self._fetchall(
+            "SELECT id, ts, type, payload FROM events WHERE computer_id=? AND project_id=?"
+            " ORDER BY seq DESC LIMIT ?",
+            (conn.computer_id, project_id, limit))
+        picked, budget = [], HISTORY_MAX_BYTES
+        for r in rows:  # newest first; the byte budget drops the oldest when it bites
+            budget -= len(r["payload"])
+            if budget < 0 and picked:
+                break
+            picked.append(r)
+        picked.reverse()
         await conn.send({"type": "history", "req": frame.get("req"), "project_id": project_id,
                          "events": [{"id": r["id"], "type": r["type"], "ts": r["ts"],
-                                     "payload": json.loads(r["payload"])} for r in rows]})
+                                     "payload": json.loads(r["payload"])} for r in picked]})
 
     async def _on_commands(self, conn: Conn, frame: dict) -> None:
         project_id = frame["project_id"]
@@ -621,6 +757,7 @@ class Relay:
                 await self.db.execute(f"DELETE FROM {table} WHERE computer_id=? AND project_id=?",
                                       (conn.computer_id, project_id))
             await self.db.commit()
+        self._stored_bytes.pop(conn.computer_id, None)
         await self._forward(conn.computer_id, {"type": "clear_events", "project_id": project_id}, role="phone")
 
 

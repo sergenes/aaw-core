@@ -33,7 +33,7 @@ One document per feed item:
 | `reminder` | `reset_at` (epoch s), `reset_label`, agent details | none |
 
 `SENSITIVE_FIELDS` in `aaw_core/transport/base.py` is the authority.
-Notifications at `success`, `warning`, and `error` are the ones that push; they are rate limited to 20 per minute per session.
+Notifications at `success`, `warning`, and `error` are the ones that push; they are rate limited to 20 per minute per session, and the relay itself also caps pushes at 20 per minute per computer.
 The plaintext copy of every event is appended to `<state dir>/sessions/<session id>.jsonl` on the computer; that file is what `aaw feed` renders and it never leaves the computer.
 
 ## 3. Commands (phone to computer, and the host's own queue)
@@ -111,6 +111,13 @@ The phone's `request` frames the supervisor answers (`response {req, kind, paylo
 | `fs_fetch` | `path_enc` | `mime`, `size`, `total_chunks`, `chunks[<encrypted base64>]`, `error` |
 
 When no computer socket is live the relay itself answers `{"error": "offline"}`.
+
+The relay enforces limits on every client (the `Abuse limits` constants in `aaw_core/relay/server.py`).
+Incoming frames are capped at 1 MiB and budgeted per connection; a socket must say hello within 10 s.
+A `history` response returns at most 1000 events and 8 MiB of payload, newest first, whatever `limit` asks.
+Each computer may retain at most 64 MiB of event payload; an `event` beyond that is answered with `error {message: "storage quota exceeded"}` and not stored.
+A fresh token cannot register a `computer_id` that is live or was seen in the last 30 days under another token; only a long-idle id (a wiped reinstall) rebinds.
+Clients that hit a limit should back off, not retry in a loop.
 
 ## 8. Push
 
