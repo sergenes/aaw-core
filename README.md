@@ -7,11 +7,14 @@
 [![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%7C%20Codex%20%7C%20Gemini%20%7C%20Grok%20%7C%20Cursor%20%7C%20scoot-orange.svg)](#supported-agents)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-**The open-source engine behind [Agents At Work](https://agentsatwork.app).**
-Run Claude Code, Codex, Gemini CLI, Grok, Cursor, and scoot on your own Mac or Linux box, and follow them from your phone: approve tool calls, answer questions, send prompts, and schedule prompts for later, end-to-end encrypted.
+What changed in each version: [GitHub Releases](https://github.com/sergenes/aaw-core/releases).
 
-> **Status: alpha.**
-> This is the engine the Agents At Work Mac app bundles and the hosted relay runs, so it is in daily use, but the command line and the config keys can still change between 0.x releases.
+**The open-source engine behind [Agents At Work](https://agentsatwork.app).**
+Run Claude Code, Codex, Gemini CLI, Grok, Cursor, and scoot on your own Mac or Linux box, and follow them from your phone: approve tool calls, answer questions, and send and schedule prompts, end-to-end encrypted.
+
+> **Status: beta.**
+> This is the engine behind the shipping Agents At Work apps: the Mac app bundles it, and the hosted relay runs it.
+> The wire protocol with the phone apps is stable ([the contract](./docs/protocol.contract.md)); the CLI flags and config keys can still change between 0.x releases.
 
 ## What is open and what is not
 
@@ -39,6 +42,13 @@ your computer                                          your phone
 - The daemon keeps **one outbound WebSocket** to a relay, so it works behind any home router or cellular NAT with **no ports, no tunnel, no VPN, no Firebase project**.
 - The relay buffers what is in flight while the phone is asleep and triggers a wake-up push. It only ever sees **ciphertext and routing metadata**: prompts, answers, and content are AES-256-GCM encrypted with a key that only your computer and your phone hold, exchanged once by QR.
 - We host a relay for free users; self-hosters run the same server with `docker compose`.
+
+## Docs
+
+- [Architecture](./docs/architecture.md): the daemon, the hooks, the store, and the relay, and how a message travels.
+- [The protocol contract](./docs/protocol.contract.md): encryption, events, commands, relay frames, push, and the limits the relay enforces.
+- [Hosting the relay yourself](./relay/README.md): docker compose, TLS, and backups.
+- [Contributing](./CONTRIBUTING.md): DCO sign-off, the PR flow, and how releases are cut.
 
 ## Install
 
@@ -98,7 +108,7 @@ To keep agents working while you are away from the laptop:
 
 The relay is a small server in this repository (`aaw_core/relay/`): run it with `docker compose` from `relay/`, or with `pip install "aaw-core[relay]"` and `python -m aaw_core.relay`, behind a TLS proxy.
 Point your computer at it with `aaw link --relay wss://your.host/v1/ws`.
-It sees only ciphertext and routing metadata, the same as ours.
+It sees only ciphertext and routing metadata, the same as ours, and it enforces per-client limits (frame size and rate, storage and push budgets; see the protocol contract).
 One difference: waking the phone with a push notification needs the app's own push credentials, so on your own relay the phone gets updates while the app is open, not in the background.
 `relay/README.md` has the details.
 
