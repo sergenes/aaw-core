@@ -21,7 +21,9 @@ from aaw_core.hooks.common import hook_log, tmux_session
 
 LIMIT_KEYWORDS = ("out of extra usage", "usage limit", "rate limit", "out of usage")
 API_ERROR_KEYWORDS = ("api error:", "sso session", "aws sso login", "invalid credentials")
-_SPINNERS = set("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷")
+# Braille is the pre-2.x spinner; Claude Code 2.x status lines start with the ·✢✳✶✻✽
+# cycle (including the "✻ ... · done" line), all filtered from scraped responses here.
+_SPINNERS = set("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷·✢✳✶✻✽")
 
 
 # ── tmux pane ───────────────────────────────────────────────────────────────

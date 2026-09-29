@@ -295,6 +295,12 @@ def detect_claude_trust_dialog(pane: str) -> dict | None:
 def detect_idle_prompt(pane: str) -> bool:
     """Claude is at the ❯ input prompt and not processing (no spinner anywhere). The trust
     dialog's "❯ No, exit" is a cursor on an option, not the input prompt."""
+    # Claude Code 2.x: the ❯ composer stays visible for the whole turn and the spinner
+    # glyphs changed, so the shortcut row is the reliable signal. It reads "esc to
+    # interrupt" during the turn and "? for shortcuts" at the real idle prompt
+    # (confirmed on 2.1.284 with pane captures).
+    if "esc to interrupt" in pane:
+        return False
     if any(c in SPINNERS for c in pane) or TRUST_YES in pane:
         return False
     tail = [ln.strip() for ln in pane.split("\n") if ln.strip()][-6:]

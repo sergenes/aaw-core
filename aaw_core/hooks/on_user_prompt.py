@@ -12,8 +12,9 @@ import sys
 from aaw_core.hooks.common import open_transport, preamble, read_payload
 
 # Claude Code fires UserPromptSubmit for its own synthetic turns too, e.g. a finished
-# background task delivered back wrapped in <task-notification>. Not the user's words.
-SYNTHETIC_PROMPT_PREFIXES = ("<task-notification>",)
+# background task wrapped in <task-notification>, and a subagent's report wrapped
+# in <agent-message>. Not the user's words, so they never reach the feed.
+SYNTHETIC_PROMPT_PREFIXES = ("<task-notification>", "<agent-message")
 
 
 def user_prompt_from(payload: dict, agent: str) -> str:
