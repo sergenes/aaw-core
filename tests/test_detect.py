@@ -138,6 +138,29 @@ def test_idle_detectors():
     assert detect.detect_idle_prompt("some output\n────────\n❯ \n")
     assert not detect.detect_idle_prompt("⠋ Thinking\n❯ \n")  # spinner: busy
     assert not detect.detect_idle_prompt("no prompt at all")
+
+
+def test_idle_prompt_claude_2x_turn_is_busy():
+    # Claude Code 2.x mid-turn (real 2.1.284 capture): new spinner glyphs, the ❯ composer
+    # visible, and "esc to interrupt" in the shortcut row. This pane once read as idle and
+    # killed the phone's working indicator seconds into the turn.
+    mid_turn = (
+        "❯ Please run the shell command sleep 45 and then write a summary.\n"
+        "· Pouncing… (2s · thinking)\n"
+        "────────\n"
+        "❯ \n"
+        "────────\n"
+        "  ⏸ manual mode on · esc to interrupt · ← 1 agent\n")
+    assert not detect.detect_idle_prompt(mid_turn)
+    # The real idle prompt: the shortcut row shows "? for shortcuts" instead, and the
+    # finished-turn line ("✻ ... · done ...") must not read as a spinner.
+    idle = (
+        "✻ Sautéed for 4m 26s · done Sunday 10:34 PM\n"
+        "────────\n"
+        "❯ \n"
+        "────────\n"
+        "  ⏸ manual mode on · ? for shortcuts · ← 1 agent\n")
+    assert detect.detect_idle_prompt(idle)
     assert detect.detect_gemini_idle(" >   Type your message or @path/to/file")
     assert not detect.detect_gemini_idle("✦ generating")
     assert detect.detect_cursor_idle("...\n-> Add a follow-up")

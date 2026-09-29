@@ -176,6 +176,8 @@ def test_user_prompt_filtering():
     assert on_user_prompt.user_prompt_from({"prompt": "  hi there "}, "claude") == "hi there"
     assert on_user_prompt.user_prompt_from({"user_prompt": "/clear"}, "claude") == ""
     assert on_user_prompt.user_prompt_from({"prompt": "<task-notification>x</task-notification>"}, "claude") == ""
+    assert on_user_prompt.user_prompt_from(
+        {"prompt": '<agent-message from="a1b2">[Subagent hand-back] report text</agent-message>'}, "claude") == ""
     assert on_user_prompt.user_prompt_from({"prompt": "<user_query>fix it</user_query>"}, "grok") == "fix it"
     assert on_user_prompt.user_prompt_from({}, "claude") == ""
 
