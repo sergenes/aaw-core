@@ -4,4 +4,4 @@ The headless host (daemon, hooks, ``aaw`` CLI) that watches coding agents in tmu
 on your own computer, plus the relay transport that connects it to your phone.
 """
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
