@@ -261,3 +261,21 @@ def test_claude_trust_dialog_is_a_dialog_not_an_idle_prompt():
     assert detect.dialog_is_open(TRUST_PANE, "codex") is False
     assert detect.detect_claude_trust_dialog("❯ \n") is None
     assert detect.is_yes_no_shaped(d["options"])
+
+
+def test_resumes_conversation_matches_agent_command(tmp_path, monkeypatch):
+    from aaw_core.host import tmux
+
+    monkeypatch.setattr("aaw_core.host.detect.Path.home", lambda: tmp_path)
+    project = tmp_path / "proj"
+    project.mkdir()
+    assert not tmux.resumes_conversation("claude", project)
+    assert tmux.agent_command("claude", project) == "claude"
+    hist = tmp_path / ".claude" / "projects" / f"-{str(project)[1:].replace('/', '-').replace('_', '-').replace('.', '-')}"
+    hist.mkdir(parents=True)
+    (hist / "s.jsonl").write_text("{}")
+    assert tmux.resumes_conversation("claude", project)
+    assert tmux.agent_command("claude", project) == "claude --continue"
+    for agent in ("codex", "gemini", "grok", "cursor"):
+        assert not tmux.resumes_conversation(agent, project)  # always a fresh conversation
+    assert not tmux.resumes_conversation("claude", None)

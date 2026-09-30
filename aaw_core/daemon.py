@@ -77,7 +77,7 @@ def forward_text(transport: RelayTransport, session: str, agent: str, text: str)
     """Type a message into the agent and echo it to the feed once it was actually
     delivered; otherwise say so, so the user resends instead of waiting."""
     if tmux.send_text(text, session, agent):
-        transport.write_event("message", {"role": "user", "content": text, "agent": agent})
+        transport.write_event("message", {"role": "user", "content": text, "agent": agent}, via="daemon")
         return
     log(f"message NOT delivered after {tmux.SEND_ATTEMPTS} attempts: {text[:60]!r}", err=True)
     try:
@@ -97,7 +97,7 @@ def flush_pending_message(transport: RelayTransport, session: str, agent: str) -
         if not tmux.send_text(queued, session, agent):
             log(f"pending message not delivered, keeping it queued: {queued[:50]}", err=True)
             return
-        transport.write_event("message", {"role": "user", "content": queued, "agent": agent})
+        transport.write_event("message", {"role": "user", "content": queued, "agent": agent}, via="daemon")
         transport.update_project(pending_message="")
         log(f"flushed the pending message: {queued[:50]}")
     except Exception as e:  # noqa: BLE001
@@ -129,10 +129,16 @@ def handle_command(cmd: dict, transport: RelayTransport, settings: Settings, *, 
             log(f"takeover check failed: {e}", err=True)
 
     def restart() -> None:
+        # Decided before the restart: the new session resumes the conversation when the
+        # folder already has history, and then the phone's feed must keep matching it.
+        resumed = tmux.resumes_conversation(agent, project_dir)
         tmux.restart_agent(session, project_dir, agent, project_id)
-        # A fresh tmux session means fresh agent context (unless --continue); reset the feed to match.
-        transport.clear_events()
-        transport.init_local_log(is_reconnect=False)
+        if resumed:
+            log("/restart: the agent resumes its conversation; the feed is kept")
+        else:
+            # A fresh conversation: reset the feed to match.
+            transport.clear_events()
+            transport.init_local_log(is_reconnect=False)
         transport.set_project_status("running", pending_question_id="")
 
     def stop() -> None:

@@ -134,6 +134,19 @@ def send_text(text: str, session: str, agent: str = "claude") -> bool:
     return False
 
 
+def resumes_conversation(agent: str, project_dir) -> bool:
+    """True when `agent_command` restarts this agent inside its previous conversation
+    (Claude and Scoot with `--continue`, when the folder has history). The other agents
+    always start a fresh conversation."""
+    if project_dir is None:
+        return False
+    if agent == "scoot":
+        return has_scoot_history(Path(project_dir))
+    if agent in ("gemini", "grok", "cursor", "codex"):
+        return False
+    return has_claude_history(project_dir)
+
+
 def agent_command(agent: str, project_dir) -> str:
     """The command line that starts an agent in a fresh tmux session."""
     if agent == "gemini":
@@ -144,10 +157,10 @@ def agent_command(agent: str, project_dir) -> str:
         return "cursor-agent --trust"  # never bare "agent": Grok installs a binary by that name
     if agent == "codex":
         return "codex"
+    resume = " --continue" if resumes_conversation(agent, project_dir) else ""
     if agent == "scoot":
-        resume = " --continue" if has_scoot_history(Path(project_dir)) else ""
         return f"scoot --approval auto-read --scope anywhere{resume}"
-    return "claude --continue" if has_claude_history(project_dir) else "claude"
+    return f"claude{resume}"
 
 
 def create_session(session: str, project_dir, agent: str, project_id: str,

@@ -12,6 +12,7 @@ already-shipped phone apps read and write. Do not change them.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import sys
 import time
@@ -180,6 +181,11 @@ def select_deliverable(commands: list[dict], key_b64: str | None, at_ms: int | N
 # ── Local per-session log ────────────────────────────────────────────────────
 
 
+# How far apart the daemon's echo and the agent's prompt hook may report the same
+# prompt: seconds in practice (the daemon waits for Enter to land, up to a few retries).
+USER_ECHO_WINDOW_MS = 15_000
+
+
 class LocalLog:
     """The plaintext per-session JSONL log that ``aaw feed`` renders.
 
@@ -212,6 +218,50 @@ class LocalLog:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except OSError as e:
             print(f"[transport] local log write failed: {e}", file=sys.stderr, flush=True)
+
+    def append_user_message_once(self, entry: dict, via: str, window_ms: int = USER_ECHO_WINDOW_MS) -> bool:
+        """Append a user message unless another writer already recorded this same prompt.
+
+        Two writers report a prompt the phone sent: the daemon, once it has typed it, and
+        the agent's own prompt hook (Claude, Scoot, Codex), a second or two apart. Each
+        tags its line with ``via``. Within the window, a write is skipped when the other
+        writers already logged more copies of the same text than this writer has, so
+        every sent prompt ends up in the feed exactly once, repeats included ("yes"
+        twice is two entries). The check and the append run under a file lock, since the
+        hook is a separate process. Returns True when the entry was appended."""
+        entry = {**entry, "via": via}
+        content = entry.get("content", "")
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a+") as f:
+                fcntl.flock(f, fcntl.LOCK_EX)
+                try:
+                    f.seek(0, 2)
+                    size = f.tell()
+                    f.seek(max(0, size - 64 * 1024))
+                    mine = others = 0
+                    since = int(entry.get("ts", 0)) - window_ms
+                    for line in f.read().splitlines()[-200:]:
+                        try:
+                            e = json.loads(line)
+                        except ValueError:
+                            continue
+                        if (e.get("type") == "message" and e.get("role") == "user"
+                                and e.get("content") == content and int(e.get("ts", 0)) >= since):
+                            if e.get("via") == via:
+                                mine += 1
+                            else:
+                                others += 1
+                    if others > mine:
+                        return False
+                    f.seek(0, 2)
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                    return True
+                finally:
+                    fcntl.flock(f, fcntl.LOCK_UN)
+        except OSError as e:
+            print(f"[transport] local log write failed: {e}", file=sys.stderr, flush=True)
+            return True
 
     def read(self) -> list[dict]:
         if not self.path.exists():

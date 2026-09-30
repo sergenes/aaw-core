@@ -112,3 +112,75 @@ def test_local_log_lifecycle(tmp_path):
 def test_rate_limiter():
     rl = RateLimiter(max_events=2, window_seconds=60)
     assert rl.allow() and rl.allow() and not rl.allow()
+
+
+# ── a prompt reported by two writers lands once ──────────────────────────────
+
+
+def _user(content, ts):
+    return {"id": f"e{ts}", "type": "message", "ts": ts, "role": "user", "content": content}
+
+
+def _users(log):
+    return [e["content"] for e in log.read() if e.get("role") == "user"]
+
+
+def test_hook_then_daemon_echo_is_one_entry(tmp_path):
+    from aaw_core.transport.base import LocalLog
+
+    log = LocalLog(tmp_path, "p")
+    assert log.append_user_message_once(_user("hi", 1000), via="hook")
+    assert not log.append_user_message_once(_user("hi", 2500), via="daemon")
+    assert _users(log) == ["hi"]
+
+
+def test_daemon_then_hook_is_one_entry(tmp_path):
+    from aaw_core.transport.base import LocalLog
+
+    log = LocalLog(tmp_path, "p")
+    assert log.append_user_message_once(_user("hi", 1000), via="daemon")
+    assert not log.append_user_message_once(_user("hi", 1200), via="hook")
+    assert _users(log) == ["hi"]
+
+
+def test_the_same_prompt_sent_twice_stays_twice(tmp_path):
+    from aaw_core.transport.base import LocalLog
+
+    log = LocalLog(tmp_path, "p")
+    # "yes", then "yes" again: each reported by both writers, in either order
+    log.append_user_message_once(_user("yes", 1000), via="hook")
+    log.append_user_message_once(_user("yes", 1500), via="daemon")
+    log.append_user_message_once(_user("yes", 3000), via="daemon")
+    log.append_user_message_once(_user("yes", 3200), via="hook")
+    assert _users(log) == ["yes", "yes"]
+
+
+def test_only_one_writer_always_writes(tmp_path):
+    from aaw_core.transport.base import LocalLog
+
+    log = LocalLog(tmp_path, "p")  # Gemini, Grok, Cursor: the daemon is the only writer
+    assert log.append_user_message_once(_user("go", 1000), via="daemon")
+    assert log.append_user_message_once(_user("go", 2000), via="daemon")
+    assert _users(log) == ["go", "go"]
+
+
+def test_outside_the_window_or_other_text_is_written(tmp_path):
+    from aaw_core.transport.base import USER_ECHO_WINDOW_MS, LocalLog
+
+    log = LocalLog(tmp_path, "p")
+    log.append_user_message_once(_user("hi", 1000), via="hook")
+    assert log.append_user_message_once(_user("hi", 1000 + USER_ECHO_WINDOW_MS + 1), via="daemon")
+    assert log.append_user_message_once(_user("other", 1100), via="daemon")
+    assert _users(log) == ["hi", "hi", "other"]
+
+
+def test_answer_echo_then_identical_prompt_keeps_both(tmp_path):
+    from aaw_core.transport.base import LocalLog
+
+    log = LocalLog(tmp_path, "p")
+    # The computer echoes a question's answer "Yes", the phone then sends the
+    # prompt "Yes", and the agent's hook reports that prompt as well.
+    assert log.append_user_message_once(_user("Yes", 1000), via="daemon")
+    assert log.append_user_message_once(_user("Yes", 3000), via="daemon")
+    assert not log.append_user_message_once(_user("Yes", 3300), via="hook")
+    assert _users(log) == ["Yes", "Yes"]
