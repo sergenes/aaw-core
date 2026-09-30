@@ -34,7 +34,7 @@ def main() -> int:
         transport = open_transport(settings, project)
         if transport is not None:
             try:
-                transport.write_event("message", {"role": "user", "content": text, "agent": agent})
+                transport.write_event("message", {"role": "user", "content": text, "agent": agent}, via="hook")
             finally:
                 transport.stop()
     return 0

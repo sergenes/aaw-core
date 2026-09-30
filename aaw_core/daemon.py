@@ -77,7 +77,7 @@ def forward_text(transport: RelayTransport, session: str, agent: str, text: str)
     """Type a message into the agent and echo it to the feed once it was actually
     delivered; otherwise say so, so the user resends instead of waiting."""
     if tmux.send_text(text, session, agent):
-        transport.write_event("message", {"role": "user", "content": text, "agent": agent})
+        transport.write_event("message", {"role": "user", "content": text, "agent": agent}, via="daemon")
         return
     log(f"message NOT delivered after {tmux.SEND_ATTEMPTS} attempts: {text[:60]!r}", err=True)
     try:
@@ -97,7 +97,7 @@ def flush_pending_message(transport: RelayTransport, session: str, agent: str) -
         if not tmux.send_text(queued, session, agent):
             log(f"pending message not delivered, keeping it queued: {queued[:50]}", err=True)
             return
-        transport.write_event("message", {"role": "user", "content": queued, "agent": agent})
+        transport.write_event("message", {"role": "user", "content": queued, "agent": agent}, via="daemon")
         transport.update_project(pending_message="")
         log(f"flushed the pending message: {queued[:50]}")
     except Exception as e:  # noqa: BLE001

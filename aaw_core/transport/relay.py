@@ -313,13 +313,20 @@ class RelayTransport:
 
     # ── events ────────────────────────────────────────────────────────────────
 
-    def write_event(self, event_type: str, payload: dict) -> str:
+    def write_event(self, event_type: str, payload: dict, via: str | None = None) -> str:
+        """Record an event in the local log and send it to the relay. ``via`` names the
+        writer of a user message (``daemon`` or ``hook``) so a prompt both report lands in
+        the feed once; see ``LocalLog.append_user_message_once``."""
         if (event_type == "notification" and payload.get("level") in PUSHABLE_NOTIFICATION_LEVELS
                 and not self._notif_limiter.allow()):
             print(f"[relay] rate limit: notification dropped (level={payload.get('level')})", flush=True)
             return ""
         stored, entry = make_event(event_type, payload, self._enc_key)
-        self._log.append(entry)  # local log first: the feed must work even if the relay is down
+        if via and event_type == "message" and payload.get("role") == "user":
+            if not self._log.append_user_message_once(entry, via):
+                return ""  # the other writer already recorded this prompt
+        else:
+            self._log.append(entry)  # local log first: the feed must work even if the relay is down
         self._send({"type": "event", "project_id": self.project_id, "event": stored})
         if event_type == "notification" and payload.get("level") in PUSHABLE_NOTIFICATION_LEVELS:
             # The same alerts the phone is pushed, for a desktop GUI that polls the mirror:
