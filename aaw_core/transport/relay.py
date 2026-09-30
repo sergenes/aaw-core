@@ -76,6 +76,8 @@ class RelayTransport:
         self._inbox: dict[str, dict] = {}  # unconsumed commands for this project, by id
         self._pending: dict[str, Future] = {}  # request id -> reply future
         self.requests: queue.Queue[dict] = queue.Queue()  # phone requests for the supervisor to answer
+        # Set when a phone deleted this session (a forwarded project_delete frame).
+        self.delete_requested = threading.Event()
         self._buffer: list[dict] = []  # outbound frames queued before/without a loop
         self._queue: asyncio.Queue | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -224,6 +226,10 @@ class RelayTransport:
                 fut = self._pending.get(frame["req"])
             if fut is not None and not fut.done():
                 fut.set_result(frame)
+        elif kind == "project_delete" and frame.get("project_id") == self.project_id:
+            # The phone removed this session: the relay already wiped its rows and is
+            # forwarding the frame. The daemon polls this and stops the session for real.
+            self.delete_requested.set()
         elif kind == "request" and frame.get("req"):
             self.requests.put(frame)
         elif kind == "error":
@@ -253,6 +259,10 @@ class RelayTransport:
 
     def delete_local_log(self) -> None:
         self._log.delete()
+
+    def delete_local_mirror(self) -> None:
+        """Forget this session's mirror document (shown by the desktop GUI)."""
+        state.remove_project(self._mirror_dir, self.project_id)
 
     # ── computer + project docs ───────────────────────────────────────────────
 
