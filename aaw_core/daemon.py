@@ -129,10 +129,16 @@ def handle_command(cmd: dict, transport: RelayTransport, settings: Settings, *, 
             log(f"takeover check failed: {e}", err=True)
 
     def restart() -> None:
+        # Decided before the restart: the new session resumes the conversation when the
+        # folder already has history, and then the phone's feed must keep matching it.
+        resumed = tmux.resumes_conversation(agent, project_dir)
         tmux.restart_agent(session, project_dir, agent, project_id)
-        # A fresh tmux session means fresh agent context (unless --continue); reset the feed to match.
-        transport.clear_events()
-        transport.init_local_log(is_reconnect=False)
+        if resumed:
+            log("/restart: the agent resumes its conversation; the feed is kept")
+        else:
+            # A fresh conversation: reset the feed to match.
+            transport.clear_events()
+            transport.init_local_log(is_reconnect=False)
         transport.set_project_status("running", pending_question_id="")
 
     def stop() -> None:
