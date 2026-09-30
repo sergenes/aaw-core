@@ -53,3 +53,10 @@ computers(computer_id PK, doc)
 ## Capacity
 
 One tuned node holds tens of thousands of idle sockets on a small box; message rates in this application are tiny. Scale by sharding on the computer owner; users are independent, so there is no cross-node state.
+
+## Store versions and rollback
+
+The store carries a version (`meta.store_version`).
+A relay older than the store refuses to start with a clear message rather than silently rejecting every token.
+When a relay upgrades the store (0.1.3 hashes the device and cursor tokens at rest), it first writes a consistent snapshot next to it, `relay.sqlite.pre-v2`.
+To roll back: stop the relay, replace `relay.sqlite` with the snapshot (and delete the `-wal`/`-shm` files), and start the previous version; only the events since the upgrade are lost.

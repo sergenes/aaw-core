@@ -60,8 +60,11 @@ and a push budget, and registrations and sockets are budgeted per client address
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import os
+import sqlite3
 import sys
 import time
 import uuid
@@ -75,13 +78,14 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from aaw_core.transport.base import COMMAND_TTL_DAYS, EVENT_TTL_DAYS, RateLimiter
+from aaw_core.transport.base import COMMAND_TTL_DAYS, EVENT_TTL_DAYS, PROTO_VERSION, RateLimiter
 
 log = logging.getLogger("aaw_core.relay")
 
 
 def _short(token: str) -> str:
-    """The first characters of a token, enough to match rows in the store, never the whole."""
+    """The first characters of a stored token hash, enough to match rows in the store;
+    the raw token itself is never logged."""
     return token[:8]
 
 
@@ -110,7 +114,24 @@ CREATE TABLE IF NOT EXISTS projects (
   computer_id TEXT NOT NULL, project_id TEXT NOT NULL, doc TEXT NOT NULL,
   PRIMARY KEY (computer_id, project_id));
 CREATE TABLE IF NOT EXISTS computers (computer_id TEXT PRIMARY KEY, doc TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
+
+# The store's on-disk format. 2 hashes the device and cursor tokens at rest; a relay
+# older than the store refuses to start (better a loud stop than every token silently
+# rejected), and the migration leaves a snapshot next to the store for a clean rollback.
+STORE_VERSION = 2
+
+
+def _token_hash(token: str) -> str:
+    """What the store keeps instead of the token: its SHA-256 hex. Tokens are random
+    256-bit values, so the hash is not brute-forceable and needs no salt; a stolen
+    store or backup no longer contains usable credentials."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _is_token_hash(value: str) -> bool:
+    return len(value) == 64 and all(c in "0123456789abcdef" for c in value)
 
 
 # The project fields a phone may set; everything else on the document is the computer's.
@@ -232,6 +253,54 @@ class Relay:
         await self.db.execute("PRAGMA journal_mode=WAL")
         await self.db.executescript(_SCHEMA)
         await self.db.commit()
+        await self._migrate_store()
+
+    async def _migrate_store(self) -> None:
+        """Bring the store to STORE_VERSION, or refuse to serve a newer store.
+
+        A store without a version predates hashing: its plaintext device and cursor
+        tokens are hashed in place, after a snapshot copy (``<db>.pre-v2``) so a
+        rollback to the previous relay restores the snapshot instead of locking
+        every client out."""
+        row = await self._fetchone("SELECT value FROM meta WHERE key='store_version'")
+        if row is not None:
+            found = int(row["value"])
+            if found > STORE_VERSION:
+                raise RuntimeError(
+                    f"the store {self.db_path} is version {found}, newer than this relay"
+                    f" (version {STORE_VERSION}); run the newer relay, or restore the"
+                    f" snapshot it left next to the store")
+            return
+        rows = await self._fetchall("SELECT token FROM devices")
+        legacy = [r["token"] for r in rows if not _is_token_hash(r["token"])]
+        if legacy:
+            self._snapshot_store()
+            for table in ("devices", "cursors"):
+                for r in await self._fetchall(f"SELECT DISTINCT token FROM {table}"):
+                    if not _is_token_hash(r["token"]):
+                        await self.db.execute(f"UPDATE {table} SET token=? WHERE token=?",
+                                              (_token_hash(r["token"]), r["token"]))
+            log.info("store migrated to version %d: %d device tokens hashed", STORE_VERSION, len(legacy))
+        await self.db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('store_version', ?)",
+                              (str(STORE_VERSION),))
+        await self.db.commit()
+
+    def _snapshot_store(self) -> None:
+        """A consistent copy of the store next to it, taken once before a migration."""
+        if self.db_path == ":memory:" or not os.path.exists(self.db_path):
+            return
+        target = f"{self.db_path}.pre-v{STORE_VERSION}"
+        src = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        try:
+            dst = sqlite3.connect(target)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+        os.chmod(target, 0o600)
+        log.info("store snapshot for rollback: %s", target)
 
     async def shutdown(self) -> None:
         if self.db is not None:
@@ -308,7 +377,7 @@ class Relay:
             if conn is None:
                 return
             self.live.setdefault(conn.computer_id, {})[conn.id] = conn
-            await conn.send({"type": "welcome", "computer_id": conn.computer_id})
+            await conn.send({"type": "welcome", "computer_id": conn.computer_id, "proto": PROTO_VERSION})
             if conn.role == "computer":
                 await self._cleanup()
                 await self._replay_commands(conn)
@@ -356,6 +425,7 @@ class Relay:
                 or _bad_str(hello.get("push_token"), "push_token", required=False)):
             await self._error(ws, "invalid hello")
             return None
+        token = _token_hash(token)  # the raw token never touches the store or the logs
         row = await self._fetchone("SELECT computer_id, role FROM devices WHERE token=?", (token,))
         if role == "computer":
             computer_id = hello.get("computer_id")
@@ -466,6 +536,7 @@ class Relay:
         if _bad_str(token, "phone_token"):
             await conn.send({"type": "error", "message": "invalid phone token"})
             return
+        token = _token_hash(token)
         await self._exec(
             "INSERT OR REPLACE INTO devices(token, computer_id, role, last_seen) VALUES(?,?,?,?)",
             (token, conn.computer_id, "phone", 0))

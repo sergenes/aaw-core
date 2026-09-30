@@ -95,6 +95,9 @@ Each `aaw link` mints a new token; earlier ones keep working.
 ## 7. Relay frames
 
 Documented in the module docstring of `aaw_core/relay/server.py` and summarized in `relay/README.md`.
+The hello frame may carry `proto`, the client's wire protocol version (`PROTO_VERSION` in `aaw_core/transport/base.py`, currently 1), and the welcome echoes the relay's; a client that sends none counts as version 1.
+Additive changes never bump it; a breaking change raises the relay's minimum, and the relay then refuses an outdated client with an actionable error instead of failing strangely.
+The relay stores only the SHA-256 of device tokens (clients keep sending the raw token); a store or backup therefore contains no usable credentials.
 The phone connects with `hello {role: "phone", token, platform?, push_token?}`, `subscribe`s to a session, `ack`s sequence numbers, sends `command` frames, and reads `history`, `commands`, `project`, `projects`, `computer`.
 It may set `auto_approve` and `pending_message` on a project with `state` (other fields are dropped), and forget a session with `project_delete`.
 It never writes events: the computer echoes a delivered prompt and a consumed answer into the feed as `message` events with `role: user`.

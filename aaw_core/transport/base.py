@@ -35,6 +35,11 @@ PUSHABLE_NOTIFICATION_LEVELS = {"success", "error", "warning"}
 EVENT_TTL_DAYS = 90
 COMMAND_TTL_DAYS = 30
 
+# The wire protocol version, sent in hello and echoed back in welcome. Additive changes
+# never bump it; a breaking change raises the relay's minimum so an outdated client is
+# refused with an actionable message instead of failing strangely. Absent means 1.
+PROTO_VERSION = 1
+
 
 def now_ms() -> int:
     return int(time.time() * 1000)
