@@ -59,6 +59,7 @@ Merged field by field (`state` frames); the phone renders the session card from 
 | --- | --- |
 | `project_id` | the session id (folder basename, or `<basename>-<agent>` for a second agent on one folder) |
 | `status` | `running` \| `waiting` (a question is pending) \| `idle` (the agent finished its turn) \| `stopped` |
+| `background_agents` | Claude only: opaque ids of subagents still running, written by the SubagentStart/SubagentStop hooks and cleared on session start, `/restart` and `/stop`. A phone showing an `idle` session with a non-empty list says "Waiting for N background agents to finish". |
 | `agent` | `claude` \| `codex` \| `gemini` \| `grok` \| `cursor` \| `scoot` |
 | `model` | scoot's provider/model, when known |
 | `project_path` | the folder, encrypted |

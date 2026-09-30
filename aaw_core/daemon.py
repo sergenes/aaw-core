@@ -33,6 +33,7 @@ from aaw_core.hooks.common import (
     tmux_session,
 )
 from aaw_core.hooks.on_stop_cursor import response_from_transcript as cursor_response_from_transcript
+from aaw_core.hooks.on_subagent import update_subagents
 from aaw_core.host import detect, tmux, usage
 from aaw_core.host.identity import load_identity
 from aaw_core.transport.relay import RelayTransport
@@ -139,12 +140,16 @@ def handle_command(cmd: dict, transport: RelayTransport, settings: Settings, *, 
             # A fresh conversation: reset the feed to match.
             transport.clear_events()
             transport.init_local_log(is_reconnect=False)
+        update_subagents(settings, project_id, clear=True)
         transport.set_project_status("running", pending_question_id="")
+        transport.update_project(background_agents=[])
 
     def stop() -> None:
         tmux.tmux_run(["kill-session", "-t", session], capture_output=True)
         try:
+            update_subagents(settings, project_id, clear=True)
             transport.set_project_status("stopped", pending_question_id="")
+            transport.update_project(background_agents=[])
             transport.delete_local_log()
         except Exception as e:  # noqa: BLE001
             log(f"could not write stopped status on /stop: {e}", err=True)
@@ -264,6 +269,8 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
     try:
         if not is_reconnect:
             transport.clear_events()
+            update_subagents(settings, project_id, clear=True)
+            transport.update_project(background_agents=[])
         transport.init_local_log(is_reconnect)
         transport.set_project_status("running", pending_question_id="" if not is_reconnect else None)
         transport.update_computer(status="running", daemon_version=__version__)
