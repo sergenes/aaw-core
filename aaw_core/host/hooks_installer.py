@@ -148,6 +148,9 @@ def update_claude_hooks() -> Path:
     settings = _read_json(path)
     hooks = settings.get("hooks") if isinstance(settings.get("hooks"), dict) else {}
     _claude_shaped(hooks, session_start_matcher="clear")
+    # Claude only: the running-subagents set behind "Waiting for N background agents".
+    merge_hook(hooks, "SubagentStart", "on_subagent", timeout=10)
+    merge_hook(hooks, "SubagentStop", "on_subagent", timeout=10)
     settings["hooks"] = hooks
     _write_json(path, settings)
     return path
