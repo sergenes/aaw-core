@@ -340,6 +340,22 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
             except Exception as e:  # noqa: BLE001
                 log(f"heartbeat failed: {e}", err=True)
 
+        if transport.delete_requested.is_set():
+            # The phone removed this session and the relay wiped its rows. Stop the real
+            # session and leave quietly: writing any status now would recreate the
+            # document the user just deleted.
+            log("session deleted from the phone; killing tmux and exiting")
+            tmux.tmux_run(["kill-session", "-t", session], capture_output=True)
+            update_subagents(settings, project_id, clear=True)
+            try:
+                transport.delete_local_log()
+                transport.delete_local_mirror()
+            except Exception as e:  # noqa: BLE001
+                log(f"could not delete the local log: {e}", err=True)
+            stopped_written = True
+            running = False
+            continue
+
         try:
             alive = tmux.has_session(session)
             if not alive:

@@ -80,6 +80,11 @@ def merge_project(directory: Path, project_id: str, fields: dict, decrypt=None) 
     return doc
 
 
+def remove_project(directory: Path, project_id: str) -> None:
+    """Forget a session's mirror document (the phone deleted the session)."""
+    _path(directory, project_id).unlink(missing_ok=True)
+
+
 def replace_projects(directory: Path, docs: dict[str, dict], decrypt=None) -> None:
     """Rewrite the mirror from the relay's full set: documents that are gone (the phone
     removed the session) are removed here too."""
