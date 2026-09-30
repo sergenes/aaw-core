@@ -72,7 +72,7 @@ def alert(event_id="n1"):
 
 def test_computer_token_is_trust_on_first_use_then_bound(relay):
     with relay.websocket_connect("/v1/ws") as ws:
-        assert hello_computer(ws) == {"type": "welcome", "computer_id": "c1"}
+        assert hello_computer(ws) == {"type": "welcome", "computer_id": "c1", "proto": 1}
     with relay.websocket_connect("/v1/ws") as ws:
         assert hello_computer(ws, computer_id="c1")["type"] == "welcome"  # same binding: fine
     with relay.websocket_connect("/v1/ws") as ws:
@@ -90,7 +90,7 @@ def test_phone_needs_a_registered_token(relay):
         comp.send_json({"type": "ping"})
         assert comp.receive_json() == {"type": "pong"}  # registration is ordered before the pong
     with relay.websocket_connect("/v1/ws") as phone:
-        assert hello_phone(phone, "ptok") == {"type": "welcome", "computer_id": "c1"}
+        assert hello_phone(phone, "ptok") == {"type": "welcome", "computer_id": "c1", "proto": 1}
 
 
 def test_events_forward_live_with_sequence_numbers_and_replay_from_cursor(relay):
@@ -613,10 +613,12 @@ def test_pairing_events_are_logged_one_line_each(relay, caplog):
             assert phone.receive_json()["type"] == "forgotten"
     messages = [r.getMessage() for r in caplog.records if r.name == "aaw_core.relay"]
     assert any(m.startswith("computer c1 (") and "registered" in m for m in messages)
-    assert "computer c1 registered phone token ptok-log (QR shown)" in messages
-    assert "phone ptok-log (android, push yes) connected to computer c1" in messages
-    assert "phone ptok-log forgotten by its own request (unlink), computer c1" in messages
-    assert not any("ptok-logged" in m for m in messages)  # never the whole token
+    import hashlib
+    h = hashlib.sha256(b"ptok-logged").hexdigest()[:8]  # logs carry the stored hash's prefix
+    assert f"computer c1 registered phone token {h} (QR shown)" in messages
+    assert f"phone {h} (android, push yes) connected to computer c1" in messages
+    assert f"phone {h} forgotten by its own request (unlink), computer c1" in messages
+    assert not any("ptok-log" in m for m in messages)  # the raw token never appears at all
 
 
 # ── abuse limits ─────────────────────────────────────────────────────────────

@@ -32,6 +32,7 @@ import websockets
 
 from aaw_core.host import state
 from aaw_core.transport.base import (
+    PROTO_VERSION,
     PUSHABLE_NOTIFICATION_LEVELS,
     LocalLog,
     RateLimiter,
@@ -138,6 +139,7 @@ class RelayTransport:
                     await ws.send(json.dumps({
                         "type": "hello", "role": "computer", "token": self.token,
                         "computer_id": self.computer_id, "computer_name": self.computer_name,
+                        "proto": PROTO_VERSION,
                     }))
                     welcome = json.loads(await asyncio.wait_for(ws.recv(), _REQUEST_TIMEOUT))
                     if welcome.get("type") != "welcome":
