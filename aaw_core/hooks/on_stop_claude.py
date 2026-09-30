@@ -99,6 +99,19 @@ def response_from_transcript(path_str: str) -> str:
     return ""
 
 
+def api_error_kind_from_text(text: str) -> str:
+    """The error family a Claude message belongs to: "auth", "limit", "prompt_too_long",
+    or "" when it matches none (the caller then shows the text as it is)."""
+    low = text.lower()
+    if "login expired" in low or "not logged in" in low:
+        return "auth"
+    if "usage limit" in low or "usage credits" in low or "session limit" in low:
+        return "limit"
+    if "prompt is too long" in low:
+        return "prompt_too_long"
+    return ""
+
+
 def api_error_kind_from_transcript(path_str: str) -> tuple[str, str]:
     """(kind, text) if the latest transcript entry is one of Claude Code's own structured
     API-error messages (``isApiErrorMessage``), else ("", ""). kind is "auth", "limit",
@@ -116,14 +129,8 @@ def api_error_kind_from_transcript(path_str: str) -> tuple[str, str]:
         text = str(content).strip()
     if not text:
         return "", ""
-    low = text.lower()
-    if "login expired" in low or "not logged in" in low:
-        return "auth", text
-    if "usage limit" in low or "usage credits" in low or "session limit" in low:
-        return "limit", text
-    if "prompt is too long" in low:
-        return "prompt_too_long", text
-    return "connection", text
+    # A structured API-error entry that matches no family is a connection problem.
+    return api_error_kind_from_text(text) or "connection", text
 
 
 def friendly_api_error_message(kind: str, text: str) -> str:

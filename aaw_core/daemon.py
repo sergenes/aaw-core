@@ -26,6 +26,7 @@ from pathlib import Path
 
 from aaw_core import __version__
 from aaw_core.config import Settings, load_settings
+from aaw_core.hooks import on_stop_claude
 from aaw_core.hooks.common import (
     is_mobile_mode,
     read_key,
@@ -74,11 +75,16 @@ def project_doc(transport: RelayTransport) -> dict:
 # ── commands from the phone ─────────────────────────────────────────────────
 
 
-def forward_text(transport: RelayTransport, session: str, agent: str, text: str) -> None:
+def forward_text(transport: RelayTransport, session: str, agent: str, text: str,
+                 turn_watch: dict | None = None) -> None:
     """Type a message into the agent and echo it to the feed once it was actually
     delivered; otherwise say so, so the user resends instead of waiting."""
     if tmux.send_text(text, session, agent):
         transport.write_event("message", {"role": "user", "content": text, "agent": agent}, via="daemon")
+        if turn_watch is not None:
+            # Watched by the main loop: a prompt the agent refuses without starting a
+            # turn (out of usage credits) must reach the phone as an error.
+            turn_watch["text"], turn_watch["ts"] = text, time.monotonic()
         return
     log(f"message NOT delivered after {tmux.SEND_ATTEMPTS} attempts: {text[:60]!r}", err=True)
     try:
@@ -105,8 +111,38 @@ def flush_pending_message(transport: RelayTransport, session: str, agent: str) -
         log(f"pending message flush failed: {e}", err=True)
 
 
+# How long a delivered prompt is watched for a refusal. A refusal renders within a
+# second or two; a turn that starts shows "esc to interrupt" and ends the watch.
+REFUSAL_WINDOW_S = 25.0
+
+
+def watch_for_refusal(transport: RelayTransport, agent: str, pane: str, turn_watch: dict) -> None:
+    """Report a prompt the agent refused without starting a turn (out of usage credits,
+    login expired): the error block under the prompt's echo goes to the phone as an
+    error notification, with the friendly wording for the families we know."""
+    if agent != "claude" or not turn_watch.get("text"):
+        return
+    if time.monotonic() - turn_watch.get("ts", 0) > REFUSAL_WINDOW_S:
+        turn_watch.clear()
+        return
+    if "esc to interrupt" in pane:
+        turn_watch.clear()  # the turn started; the prompt was not refused
+        return
+    refusal = detect.detect_refused_prompt(pane, turn_watch["text"])
+    if not refusal:
+        return
+    turn_watch.clear()
+    kind = on_stop_claude.api_error_kind_from_text(refusal)
+    message = on_stop_claude.friendly_api_error_message(kind, refusal) if kind else refusal
+    log(f"prompt refused without a turn ({kind or 'other'}): {refusal[:80]!r}")
+    try:
+        transport.write_notification(message, level="error")
+    except Exception as e:  # noqa: BLE001
+        log(f"could not report the refused prompt: {e}", err=True)
+
+
 def handle_command(cmd: dict, transport: RelayTransport, settings: Settings, *, session: str, agent: str,
-                   project_dir: Path, project_id: str) -> None:
+                   project_dir: Path, project_id: str, turn_watch: dict | None = None) -> None:
     """Route one command document: plain text is typed into the agent; /restart, /stop,
     /status and /usage act on the session. Legacy command types are still honored."""
     payload = cmd.get("payload") or {}
@@ -170,10 +206,10 @@ def handle_command(cmd: dict, transport: RelayTransport, settings: Settings, *, 
             usage.fetch_usage(transport, project_dir, agent)
         else:
             transport.set_project_status("running")
-            forward_text(transport, session, agent, args)
+            forward_text(transport, session, agent, args, turn_watch)
     elif command in ("btw", "prompt"):  # legacy
         transport.set_project_status("running")
-        forward_text(transport, session, agent, args)
+        forward_text(transport, session, agent, args, turn_watch)
     elif command == "restart":
         restart()
     elif command == "stop":
@@ -327,6 +363,7 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
         transport.set_project_status("waiting", pending_question_id=event_id)
         return event_id
 
+    turn_watch: dict = {}
     while running:
         now = time.time()
 
@@ -386,6 +423,7 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
 
             if alive:
                 pane = tmux.visible_pane(session)
+                watch_for_refusal(transport, agent, pane, turn_watch)
 
                 # ── Claude Code "trust this folder" dialog ─────────────────
                 trust = detect.detect_claude_trust_dialog(pane) if agent == "claude" else None
@@ -679,7 +717,7 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
                 for cmd in commands:  # execute, then mark done, per command (at-least-once)
                     try:
                         handle_command(cmd, transport, settings, session=session, agent=agent,
-                                       project_dir=project_dir, project_id=project_id)
+                                       project_dir=project_dir, project_id=project_id, turn_watch=turn_watch)
                         transport.mark_command_done(cmd.get("id"), ok=True)
                     except Exception as e:  # noqa: BLE001
                         log(f"command handler error for {str(cmd.get('id'))[:8]}: {e}", err=True)
