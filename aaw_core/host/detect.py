@@ -307,6 +307,55 @@ def detect_idle_prompt(pane: str) -> bool:
     return any(ln.startswith("❯") for ln in tail)
 
 
+def detect_refused_prompt(pane: str, prompt_text: str) -> str | None:
+    """The error Claude printed under a prompt it refused without starting a turn
+    (out of usage credits, login expired), or None.
+
+    The refusal renders as the echoed prompt with a ``⎿`` block right under it and no
+    turn ever starts, so the shortcut row never says "esc to interrupt":
+
+        ❯ Hey
+          ⎿  You're out of usage credits. Run /usage-credits to keep using ...
+             models.
+
+    The caller says which prompt it delivered; the block must sit under that echo, so
+    an older turn's ``⎿`` output lines are never mistaken for a refusal."""
+    if "esc to interrupt" in pane:
+        return None
+    head = prompt_text.strip().split("\n")[0][:40]
+    if not head:
+        return None
+    lines = pane.split("\n")
+    start = None
+    for i, ln in enumerate(lines):  # the last echo of this prompt
+        stripped = ln.strip()
+        if stripped.startswith("❯") and stripped.lstrip("❯").strip().startswith(head):
+            start = i
+    if start is None:
+        return None
+    collected: list[str] = []
+    echo_tail = 0  # a long prompt's echo wraps; step over its own continuation lines
+    for ln in lines[start + 1:]:
+        stripped = ln.strip()
+        if not collected:
+            if not stripped:
+                continue
+            if stripped.startswith("⎿"):
+                collected.append(stripped.lstrip("⎿").strip())
+                continue
+            if (stripped.startswith(("⏺", "✻", "❯", "·", "✢", "✳", "✶", "✽"))
+                    or set(stripped) <= set("─")):
+                return None  # a turn ran, or nothing but the composer follows
+            echo_tail += 1
+            if echo_tail > 6:
+                return None
+            continue
+        if stripped.startswith(("❯", "⎿")) or not stripped or set(stripped) <= set("─"):
+            break
+        collected.append(stripped)  # a wrapped continuation line
+    return " ".join(collected) if collected else None
+
+
 def detect_gemini_idle(pane: str) -> bool:
     """Gemini CLI shows "Type your message or @path/to/file" only when idle."""
     return "Type your message" in pane
