@@ -172,3 +172,15 @@ def test_outside_the_window_or_other_text_is_written(tmp_path):
     assert log.append_user_message_once(_user("hi", 1000 + USER_ECHO_WINDOW_MS + 1), via="daemon")
     assert log.append_user_message_once(_user("other", 1100), via="daemon")
     assert _users(log) == ["hi", "hi", "other"]
+
+
+def test_answer_echo_then_identical_prompt_keeps_both(tmp_path):
+    from aaw_core.transport.base import LocalLog
+
+    log = LocalLog(tmp_path, "p")
+    # The computer echoes a question's answer "Yes", the phone then sends the
+    # prompt "Yes", and the agent's hook reports that prompt as well.
+    assert log.append_user_message_once(_user("Yes", 1000), via="daemon")
+    assert log.append_user_message_once(_user("Yes", 3000), via="daemon")
+    assert not log.append_user_message_once(_user("Yes", 3300), via="hook")
+    assert _users(log) == ["Yes", "Yes"]

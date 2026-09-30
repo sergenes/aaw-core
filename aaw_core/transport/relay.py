@@ -397,7 +397,9 @@ class RelayTransport:
         # The answer's trace in the feed, right after its question, once the question card
         # is gone. The phone cannot write events on the relay, so the computer does it.
         if answer:
-            self.write_event("message", {"role": "user", "content": answer})
+            # via="daemon": a free-text answer is typed into the pane, so the agent's
+            # prompt hook reports it too, and the two must land as one feed entry.
+            self.write_event("message", {"role": "user", "content": answer}, via="daemon")
         return answer
 
     def poll_answer(self, deadline: float) -> str | None:
