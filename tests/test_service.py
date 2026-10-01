@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import plistlib
 from pathlib import Path
 
@@ -34,6 +35,8 @@ def test_unit_path_is_per_platform(monkeypatch):
 
 
 def test_only_aaw_variables_are_captured(monkeypatch):
+    for name in [n for n in os.environ if n.startswith("AAW_")]:
+        monkeypatch.delenv(name)  # the suite may itself run inside a bridged session
     monkeypatch.setenv("AAW_RELAY_URL", "wss://r")
     monkeypatch.setenv("AAW_EMPTY", "")
     monkeypatch.setenv("OTHER", "x")

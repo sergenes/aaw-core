@@ -4,8 +4,11 @@ Claude Code fires SubagentStart when a turn spawns a subagent and SubagentStop w
 finishes, which may be after the turn itself ended ("Waiting for 1 background agent to
 finish"). The ids of a real subagent match between the two events; Claude also fires
 stop-only events for its internal helper agents, so an unknown id's stop is a no-op.
-The current set lives in a file the daemon clears on session start, /restart and /stop,
-and its ids are mirrored to the project document as ``background_agents``.
+The current set lives in a file the daemon clears on session start, /restart, /stop and
+when the tmux session is confirmed gone; its ids are mirrored to the project document as
+``background_agents``. Hook events can outlive the session that fired them (a kill while
+a turn is winding down), so a SubagentStart whose tmux session no longer exists is
+dropped rather than allowed to resurrect state for a dead session.
 Never blocks: always exits 0.
 """
 
@@ -17,7 +20,8 @@ import sys
 from pathlib import Path
 
 from aaw_core.config import Settings
-from aaw_core.hooks.common import hook_log, open_transport, preamble, read_payload
+from aaw_core.hooks.common import hook_log, open_transport, preamble, read_payload, tmux_session
+from aaw_core.host.tmux import session_confirmed_gone
 
 
 def subagents_file(settings: Settings, project: str) -> Path:
@@ -61,6 +65,10 @@ def main() -> int:
     if not agent_id:
         return 0
     if event == "SubagentStart":
+        if session_confirmed_gone(tmux_session(project)):
+            hook_log(settings, "on_subagent",
+                     f"{event} {agent_id} dropped: the tmux session is gone")
+            return 0
         ids = update_subagents(settings, project, add=agent_id)
     elif event == "SubagentStop":
         before = update_subagents(settings, project)
