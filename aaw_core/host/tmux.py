@@ -43,6 +43,21 @@ def has_session(session: str) -> bool:
     return tmux_run(["has-session", "-t", session], capture_output=True).returncode == 0
 
 
+def session_confirmed_gone(session: str) -> bool:
+    """True only when tmux positively confirms the session is gone: the server answers
+    without it in the list, or no server is running at all. has-session fails
+    transiently, so any ambiguous error counts as "still there"."""
+    try:
+        r = tmux_run(["list-sessions", "-F", "#{session_name}"],
+                     capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if r.returncode == 0:
+        return session not in r.stdout.splitlines()
+    err = r.stderr or ""
+    return "no server running" in err or "error connecting to" in err
+
+
 def send_keys(session: str, *keys: str) -> bool:
     """Send key names (e.g. "1", "y", "Down", "Enter") without literal interpretation."""
     r = tmux_run(["send-keys", "-t", session, *keys], capture_output=True, timeout=5)

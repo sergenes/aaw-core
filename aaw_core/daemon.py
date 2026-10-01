@@ -406,6 +406,8 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
                     if gone:
                         if not stopped_written:
                             try:
+                                update_subagents(settings, project_id, clear=True)
+                                transport.update_project(background_agents=[])
                                 transport.set_project_status("stopped", pending_question_id="")
                                 transport.delete_local_log()
                                 stopped_written = True
