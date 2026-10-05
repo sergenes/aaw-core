@@ -157,12 +157,22 @@ def decide(settings: Settings, project: str, agent: str, payload: dict) -> tuple
                 hook_log(settings, "on_pre_tool", "pending question never cleared; sending anyway")
 
         hook_log(settings, "on_pre_tool", f"sending question to mobile: {question!r}")
-        transport.send_question(project=project, agent=agent, question=question, options=OPTIONS)
+        transport.send_question(project=project, agent=agent, question=question, options=OPTIONS,
+                                timeout_s=ANSWER_TIMEOUT_S)
         answer = transport.poll_answer(time.time() + ANSWER_TIMEOUT_S)
         if answer is not None:
             refresh_mobile_mode(settings)  # answering counts as phone activity
         hook_log(settings, "on_pre_tool", f"got answer: {answer!r}")
 
+        if answer is None:
+            # Nobody answered within the window. An arriving answer clears
+            # pending_question_id (_take_answer); on a timeout only this hook can, and
+            # leaving it set keeps a zombie card on the phone and makes the next
+            # question wait out PENDING_WAIT_S behind the stale id.
+            transport.set_project_status("running", pending_question_id="")
+            transport.write_notification(
+                f"No answer in {ANSWER_TIMEOUT_S // 60} minutes; approved and continued: {question}",
+                level="info")
         if answer == "No":
             return block_output(agent)
         if answer == "Yes for this session":

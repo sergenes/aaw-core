@@ -369,10 +369,11 @@ class RelayTransport:
     # ── questions and answers ─────────────────────────────────────────────────
 
     def send_question(self, project: str, agent: str, question: str, context: str = "",
-                      options: list | None = None, kind: str = "permission") -> None:
+                      options: list | None = None, kind: str = "permission",
+                      timeout_s: int = 600) -> None:
         payload = {
             "question": question, "context": context, "options": options or [],
-            "kind": kind, "timeout_at": int(time.time()) + 600, "agent": agent,
+            "kind": kind, "timeout_at": int(time.time()) + timeout_s, "agent": agent,
         }
         self._question_id = self.write_event("question", payload)
         self.set_project_status("waiting", last_event_summary=question[:80], pending_question_id=self._question_id)
