@@ -357,9 +357,13 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
         return bool(project_doc(transport).get("auto_approve"))
 
     def send_question(question: str, options: list, kind: str, context: str, **extra) -> str:
+        # No timeout_at: a pane question stays answerable for as long as the prompt
+        # is on screen (the daemon clears pending_question_id when it leaves), so a
+        # 5-minute stamp here was a lie the phone would act on - it renders a card
+        # with a timeout_at as expired and refuses taps once it passes. Only hook
+        # questions carry one (the hook really does stop waiting at ANSWER_TIMEOUT_S).
         event_id = transport.write_event("question", {"question": question, "options": options, "kind": kind,
-                                                      "timeout_at": int(time.time()) + 300, "context": context,
-                                                      "agent": agent, **extra})
+                                                      "context": context, "agent": agent, **extra})
         transport.set_project_status("waiting", pending_question_id=event_id)
         return event_id
 
