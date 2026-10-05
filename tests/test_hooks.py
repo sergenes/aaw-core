@@ -159,6 +159,54 @@ def test_readonly_tools_are_approved_without_a_transport(settings):
     assert json.loads(out) == {"decision": "approve"} and code == 0
 
 
+class _NoAnswerTransport:
+    """A transport whose question is never answered; records what decide() does about it."""
+
+    def __init__(self):
+        self.question_kwargs = None
+        self.status_calls = []
+        self.notifications = []
+
+    def get_project(self):
+        return {}
+
+    def send_question(self, **kwargs):
+        self.question_kwargs = kwargs
+
+    def poll_answer(self, deadline):
+        return None  # the 5 minutes pass with nobody answering
+
+    def set_project_status(self, status, last_event_summary="", pending_question_id=None):
+        self.status_calls.append((status, pending_question_id))
+
+    def write_notification(self, message, level, set_running=False):
+        self.notifications.append((message, level))
+
+    def update_project(self, **fields):
+        pass
+
+    def stop(self):
+        pass
+
+
+def test_an_unanswered_question_clears_itself_and_leaves_a_trace(settings, monkeypatch):
+    """A poll_answer timeout must not leave a zombie card: the stale pending_question_id
+    stalled the next question for a full PENDING_WAIT_S (seen live 2026-09-30), and the
+    default-approve left no trace in the feed."""
+    transport = _NoAnswerTransport()
+    monkeypatch.setattr(on_pre_tool, "open_transport", lambda s, p: transport)
+    out, code = on_pre_tool.decide(settings, "p", "claude",
+                                   {"tool_name": "Bash", "tool_input": {"command": "ls"}})
+    assert json.loads(out) == {"decision": "approve"} and code == 0  # timeout still default-approves
+    assert ("running", "") in transport.status_calls  # the card dismisses and the queue unblocks
+    assert transport.notifications, "a silent default-approve: the feed must say what happened"
+    message, level = transport.notifications[0]
+    assert "No answer in 5 minutes" in message and "approved and continued" in message
+    assert level == "info"  # feed-only, never a push
+    # the card's countdown must not promise more time than the hook will wait
+    assert transport.question_kwargs.get("timeout_s") == on_pre_tool.ANSWER_TIMEOUT_S
+
+
 # ── on_post_tool / on_user_prompt / on_notification ────────────────────────
 
 
