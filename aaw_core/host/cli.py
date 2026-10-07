@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -102,6 +103,16 @@ def qr_payload(settings: Settings, phone_token: str) -> str:
                       sort_keys=True, separators=(",", ":"))
 
 
+def deep_link(payload: str) -> str:
+    """The same pairing payload as a tappable URL, for pairing from an SSH app on the
+    phone itself (no camera to scan the QR). The payload (which contains the key and a
+    slash-and-plus base64) is url-safe-base64'd into one query value so nothing in it
+    needs escaping; the app decodes `d` and feeds it into the same pairing path as a scan.
+    The key still travels phone-app to phone-app only, never through a server."""
+    enc = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+    return f"agentsatwork://link?d={enc}"
+
+
 def configure_relay(settings: Settings, *, url: str | None = None, ask=input, quiet: bool = False) -> Settings:
     """Pick the relay this computer uses and save it to config.json. With no `url`, ask:
     the hosted relay (free, notifications work) or the user's own."""
@@ -167,6 +178,8 @@ def cmd_link(a, settings: Settings) -> None:
     qr.print_ascii(invert=not a.light)
     print("\nScan with the Agents At Work app (Computers, then the QR icon). Each `aaw link` mints a new phone token;"
           " earlier ones keep working.")
+    print("\nOr, if you are reading this in an SSH app on the phone itself, tap this link to pair without the camera:")
+    print(f"  {deep_link(payload)}")
     if service.is_running():
         print("Then: aaw start ~/your/project")
     else:
