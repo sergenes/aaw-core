@@ -114,3 +114,73 @@ def test_session_bridges_prompts_and_reports_stop(host):
         phone.close()
     finally:
         reader.stop(flush_timeout=0)
+
+
+def test_a_prompt_sent_during_the_stopped_gap_lands_on_restart(host):
+    """The 2026-09-29 incident: /exit killed the session, a phone prompt arrived in the
+    gap before the user restarted, and the restarted session never saw it. The feed said
+    sent; the terminal said nothing. A prompt sent while no daemon is alive must land
+    exactly once in the next session for that folder (the relay replays unconsumed
+    commands to every new computer connection)."""
+    settings, ident, key, project, relay_url = host
+    sessions.start_session(settings, project, SESSION_ID, "claude")
+    session = tmux_session(SESSION_ID)
+    assert _poll_until(lambda: "fake claude ready" in tmux.visible_pane(session), timeout=15)
+
+    reader = RelayTransport(relay_url=relay_url, token=ident.token, computer_id=ident.computer_id,
+                            project_id="_test", sessions_dir=settings.sessions_dir, enc_key=key).start()
+    try:
+        assert reader.wait_connected(10)
+        assert _poll_until(lambda: (reader.list_projects().get(SESSION_ID) or {}).get("status")
+                           in ("running", "idle"), timeout=30)
+
+        # the session dies and its daemon exits: the gap begins
+        tmux.tmux_run(["kill-session", "-t", session], capture_output=True)
+        assert _poll_until(lambda: (reader.list_projects().get(SESSION_ID) or {}).get("status") == "stopped",
+                           timeout=45)
+        assert _poll_until(lambda: sessions.daemon_pid(settings, SESSION_ID) is None, timeout=30)
+
+        # a prompt arrives while nothing is alive to deliver it
+        phone = _phone_connect(relay_url, reader.register_phone_token())
+        cmd = make_command("missed while stopped", key, source="phone")
+        phone.send(json.dumps({"type": "command", "project_id": SESSION_ID, "command": cmd}))
+
+        def stored_unconsumed():
+            docs = reader.list_commands(SESSION_ID)
+            return any(d.get("id") == cmd["id"] and not d.get("consumed") for d in docs)
+        assert _poll_until(stored_unconsumed, timeout=15)
+
+        # the user restarts the session: the prompt must land exactly once
+        sessions.start_session(settings, project, SESSION_ID, "claude")
+        assert _poll_until(lambda: "fake claude ready" in tmux.visible_pane(session), timeout=15)
+        assert _poll_until(lambda: tmux.visible_pane(session).count("you said: missed while stopped") == 1,
+                           timeout=30)
+
+        def consumed():
+            docs = reader.list_commands(SESSION_ID)
+            return all(d.get("consumed") for d in docs if d.get("id") == cmd["id"])
+        assert _poll_until(consumed, timeout=30)
+
+        # a prompt that waited past the cap is dropped with a feed notice, not typed:
+        # same gap, but the command's ts says it has been waiting over STALE_COMMAND_S
+        from aaw_core.daemon import STALE_COMMAND_S
+        from aaw_core.transport.base import now_ms
+        tmux.tmux_run(["kill-session", "-t", session], capture_output=True)
+        assert _poll_until(lambda: sessions.daemon_pid(settings, SESSION_ID) is None, timeout=30)
+        old = make_command("too late to matter", key, source="phone")
+        old["ts"] = now_ms() - (STALE_COMMAND_S + 120) * 1000
+        phone.send(json.dumps({"type": "command", "project_id": SESSION_ID, "command": old}))
+        assert _poll_until(lambda: any(d.get("id") == old["id"] for d in reader.list_commands(SESSION_ID)),
+                           timeout=15)
+        phone.send(json.dumps({"type": "subscribe", "project_id": SESSION_ID}))
+        sessions.start_session(settings, project, SESSION_ID, "claude")
+        assert _poll_until(lambda: "fake claude ready" in tmux.visible_pane(session), timeout=15)
+        notice = _recv_until(phone, lambda f: f.get("type") == "event" and f["event"]["type"] == "notification"
+                             and "Not delivered" in decrypt(f["event"]["payload"]["message"], key), timeout=30)
+        assert "too late to matter" in decrypt(notice["event"]["payload"]["message"], key)
+        assert "you said: too late to matter" not in tmux.visible_pane(session)
+        assert _poll_until(lambda: all(d.get("consumed") for d in reader.list_commands(SESSION_ID)
+                                       if d.get("id") == old["id"]), timeout=30)
+        phone.close()
+    finally:
+        reader.stop(flush_timeout=0)

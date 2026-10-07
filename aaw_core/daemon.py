@@ -41,6 +41,10 @@ from aaw_core.transport.relay import RelayTransport
 
 UNDELIVERED_NOTICE = ("Your message did not reach the session (tmux was unresponsive). "
                       "Please send it again.")
+# A command that waited longer than this (sent while the session was stopped, delivered
+# by the relay's replay on the next start) is dropped with a feed notice instead of
+# surprising a session that has long moved on. Scheduled prompts age from deliver_at.
+STALE_COMMAND_S = 30 * 60
 COMMAND_POLL_S = 2.0
 HEARTBEAT_S = 30.0
 LOOP_SLEEP_S = 0.5  # short, so a prompt reaches the phone before the user answers it on the desktop
@@ -73,6 +77,22 @@ def project_doc(transport: RelayTransport) -> dict:
 
 
 # ── commands from the phone ─────────────────────────────────────────────────
+
+
+def stale_notice(cmd: dict, now_s: float | None = None) -> str | None:
+    """The feed message for a command that waited too long to deliver, or None while it
+    is fresh. Age counts from deliver_at for a scheduled prompt (its send time is the
+    moment it was due, however long ago it was queued), else from the command's ts."""
+    due_ms = cmd.get("deliver_at") or cmd.get("ts") or 0
+    age_s = (now_s if now_s is not None else time.time()) - due_ms / 1000
+    if not due_ms or age_s <= STALE_COMMAND_S:
+        return None
+    text = ((cmd.get("payload") or {}).get("args") or "").strip()
+    name = f' "{text[:60]}"' if text else ""
+    hours = age_s / 3600
+    waited = f"{int(hours)}h" if hours >= 1 else f"{int(age_s / 60)}m"
+    return (f"Not delivered: the prompt{name} arrived {waited} ago while the session "
+            "was stopped and has expired. Send it again if you still want it.")
 
 
 def forward_text(transport: RelayTransport, session: str, agent: str, text: str,
@@ -722,6 +742,12 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
                 commands = transport.poll_commands()
                 for cmd in commands:  # execute, then mark done, per command (at-least-once)
                     try:
+                        notice = stale_notice(cmd)
+                        if notice:
+                            log(f"stale command {str(cmd.get('id'))[:8]} dropped with a feed notice")
+                            transport.write_notification(notice, level="error")
+                            transport.mark_command_done(cmd.get("id"), ok=False)
+                            continue
                         handle_command(cmd, transport, settings, session=session, agent=agent,
                                        project_dir=project_dir, project_id=project_id, turn_watch=turn_watch)
                         transport.mark_command_done(cmd.get("id"), ok=True)

@@ -43,3 +43,38 @@ def test_restart_that_starts_fresh_clears_the_feed(monkeypatch, tmp_path):
     calls = _restart(monkeypatch, tmp_path, resumed=False)
     assert calls == ["clear_events", "init_local_log(reconnect=False)",
                      "status=running", "update=['background_agents']"]
+
+
+# ── stale commands: the age cap on deliver-on-reconnect ─────────────────────
+
+
+def test_stale_notice_only_past_the_cap():
+    now = 1_700_000_000.0
+    fresh = {"ts": int((now - 60) * 1000), "payload": {"args": "hi"}}
+    assert daemon.stale_notice(fresh, now_s=now) is None
+
+    at_the_cap = {"ts": int((now - daemon.STALE_COMMAND_S) * 1000), "payload": {"args": "hi"}}
+    assert daemon.stale_notice(at_the_cap, now_s=now) is None  # the cap itself is still fresh
+
+    old = {"ts": int((now - daemon.STALE_COMMAND_S - 60) * 1000), "payload": {"args": "fix the tests"}}
+    notice = daemon.stale_notice(old, now_s=now)
+    assert notice is not None
+    assert "fix the tests" in notice and "Not delivered" in notice and "31m" in notice
+
+
+def test_stale_notice_ages_scheduled_prompts_from_deliver_at():
+    now = 1_700_000_000.0
+    # queued two days ago, due one minute ago: fresh, the 2 AM prompt must still fire
+    due_now = {"ts": int((now - 2 * 86400) * 1000), "deliver_at": int((now - 60) * 1000),
+               "payload": {"args": "run the nightly"}}
+    assert daemon.stale_notice(due_now, now_s=now) is None
+
+    # due three hours ago (the computer slept through it): expired, with the age in hours
+    overslept = {"ts": int((now - 2 * 86400) * 1000), "deliver_at": int((now - 3 * 3600) * 1000),
+                 "payload": {"args": "run the nightly"}}
+    notice = daemon.stale_notice(overslept, now_s=now)
+    assert notice is not None and "3h" in notice
+
+
+def test_stale_notice_without_any_timestamp_is_fresh():
+    assert daemon.stale_notice({"payload": {"args": "hi"}}, now_s=1_700_000_000.0) is None
