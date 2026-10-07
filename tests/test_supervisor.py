@@ -81,6 +81,20 @@ def test_fs_fetch_round_trip(sup):
     assert sup.handle_request("fs_fetch", {})["error"] == fs.ERR_DENIED
 
 
+def test_fs_attach_saves_the_image_and_returns_its_path(sup):
+    img = b"\xff\xd8\xff" + b"photo" * 50
+    chunks = [encrypt(base64.b64encode(img[i:i + 16]).decode(), KEY) for i in range(0, len(img), 16)]
+    reply = sup.handle_request("fs_attach", {"chunks": chunks, "suffix": "jpg"})
+    assert reply["error"] == "" and reply["size"] == len(img)
+    path = decrypt(reply["path_enc"], KEY)
+    assert path.startswith(str(sup.settings.attachments_dir)) and path.endswith(".jpg")
+    with open(path, "rb") as f:
+        assert f.read() == img
+    # an undecryptable chunk (wrong key) is a denied request, never a crash
+    bad = sup.handle_request("fs_attach", {"chunks": [encrypt("x", generate_key_b64())], "suffix": "jpg"})
+    assert bad["error"] == fs.ERR_DENIED
+
+
 def test_unknown_request_and_no_key(sup):
     assert sup.handle_request("bogus", {}) == {"error": "unknown_request"}
     sup.enc_key = None

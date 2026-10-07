@@ -20,6 +20,14 @@ MAX_ENTRIES = 500
 MAX_FETCH_BYTES = 4 * 1024 * 1024  # one response frame; base64 + encryption grow it ~1.8x
 RAW_CHUNK = 512 * 1024
 
+# An attached image the phone uploads (downscaled to a JPEG before it is sent). The cap is
+# generous for a photo while bounding what one request can write; the phone sends far less.
+MAX_ATTACH_BYTES = 12 * 1024 * 1024
+ATTACH_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic"}
+# Attachments older than this are swept on each new upload: a prompt uses its image at once,
+# so nothing needs to linger, and the folder never grows without bound.
+ATTACH_TTL_S = 24 * 60 * 60
+
 # extension -> mime; text only for now (images would need only an entry here: the
 # transfer is already binary-safe).
 ALLOWED = {
@@ -152,6 +160,60 @@ def fetch_file(path: str, roots: list[str] | tuple[str, ...] | None = None) -> d
 
     chunks = [base64.b64encode(data[i:i + RAW_CHUNK]).decode() for i in range(0, len(data), RAW_CHUNK)] or [""]
     return {"mime": ALLOWED[ext], "size": size, "chunks": chunks, "error": ""}
+
+
+def save_attachment(chunks_b64: list[str], suffix: str, dest_dir: str) -> dict:
+    """Write an image the phone uploaded and return its local path::
+
+        {path, size, error}
+
+    ``chunks_b64`` are the base64 raw slices (the download path in reverse; the supervisor
+    has already decrypted each). The suffix is checked against an image allowlist and the
+    joined size against MAX_ATTACH_BYTES. Stale attachments are swept first so the folder
+    never grows without bound. The write is ours, not a user path, so there is no root fence,
+    but the name is random and the suffix sanitized so the request cannot choose the path.
+    """
+    ext = ("." + suffix.lstrip(".")).lower()
+    if ext not in ATTACH_SUFFIXES:
+        return _attach_err(ERR_UNSUPPORTED)
+    try:
+        data = b"".join(base64.b64decode(c) for c in chunks_b64 if c)
+    except (ValueError, TypeError):
+        return _attach_err(ERR_DENIED)
+    if not data:
+        return _attach_err(ERR_NOT_A_FILE)
+    if len(data) > MAX_ATTACH_BYTES:
+        return _attach_err(ERR_TOO_LARGE)
+    try:
+        os.makedirs(dest_dir, mode=0o700, exist_ok=True)
+        _sweep_old_attachments(dest_dir)
+        name = base64.urlsafe_b64encode(os.urandom(12)).decode().rstrip("=") + ext
+        target = os.path.join(dest_dir, name)
+        with open(target, "wb") as f:
+            f.write(data)
+        os.chmod(target, 0o600)
+    except OSError:
+        return _attach_err(ERR_DENIED)
+    return {"path": target, "size": len(data), "error": ""}
+
+
+def _sweep_old_attachments(dest_dir: str) -> None:
+    import time
+    cutoff = time.time() - ATTACH_TTL_S
+    try:
+        entries = os.scandir(dest_dir)
+    except OSError:
+        return
+    for e in entries:
+        try:
+            if e.is_file() and e.stat().st_mtime < cutoff:
+                os.remove(e.path)
+        except OSError:
+            pass
+
+
+def _attach_err(kind: str) -> dict:
+    return {"path": "", "size": 0, "error": kind}
 
 
 def _dir_err(kind: str) -> dict:

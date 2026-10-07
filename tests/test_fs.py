@@ -65,3 +65,40 @@ def test_fetch_file_allowlist_cap_and_chunks(tmp_path, monkeypatch):
     res = fs.fetch_file(str(root / "proj" / "notes.md"), [str(root)])
     assert b"".join(base64.b64decode(c) for c in res["chunks"]) == b"# notes\n"
     assert len(res["chunks"]) == 3
+
+
+def test_save_attachment_writes_the_image_and_returns_a_path(tmp_path):
+    dest = str(tmp_path / "attach")
+    img = b"\xff\xd8\xff" + b"jpeg-bytes" * 100  # stand-in bytes; the daemon never inspects them
+    chunks = [base64.b64encode(img[i:i + 8]).decode() for i in range(0, len(img), 8)]
+    res = fs.save_attachment(chunks, "jpg", dest)
+    assert res["error"] == "" and res["size"] == len(img)
+    assert res["path"].startswith(dest) and res["path"].endswith(".jpg")
+    with open(res["path"], "rb") as f:
+        assert f.read() == img
+    assert oct(os.stat(res["path"]).st_mode & 0o777) == "0o600"
+
+
+def test_save_attachment_rejects_bad_type_and_oversize(tmp_path, monkeypatch):
+    dest = str(tmp_path / "attach")
+    one = base64.b64encode(b"x").decode()
+    assert fs.save_attachment([one], "exe", dest)["error"] == fs.ERR_UNSUPPORTED
+    assert fs.save_attachment([one], "svg", dest)["error"] == fs.ERR_UNSUPPORTED
+    assert fs.save_attachment([], "jpg", dest)["error"] == fs.ERR_NOT_A_FILE
+    monkeypatch.setattr(fs, "MAX_ATTACH_BYTES", 4)
+    big = base64.b64encode(b"123456789").decode()
+    assert fs.save_attachment([big], "png", dest)["error"] == fs.ERR_TOO_LARGE
+
+
+def test_save_attachment_sweeps_stale_files(tmp_path, monkeypatch):
+    import time
+    dest = tmp_path / "attach"
+    dest.mkdir()
+    old = dest / "old.jpg"
+    old.write_bytes(b"old")
+    os.utime(old, (time.time() - fs.ATTACH_TTL_S - 10,) * 2)
+    fresh = dest / "fresh.jpg"
+    fresh.write_bytes(b"new")
+    fs.save_attachment([base64.b64encode(b"img").decode()], "jpg", str(dest))
+    assert not old.exists()   # swept
+    assert fresh.exists()     # within the TTL, kept

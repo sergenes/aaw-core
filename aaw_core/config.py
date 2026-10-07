@@ -69,6 +69,12 @@ class Settings:
         return self.state_dir / "sessions"
 
     @property
+    def attachments_dir(self) -> Path:
+        """Images the phone attaches to a prompt land here (decrypted), and the prompt
+        references the path. Swept on a TTL; never a session's own files."""
+        return self.state_dir / "attachments"
+
+    @property
     def run_dir(self) -> Path:
         """Pid files of the daemons and the keep-awake helper."""
         return self.state_dir / "run"
