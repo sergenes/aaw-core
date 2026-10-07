@@ -187,9 +187,15 @@ def create_session(session: str, project_dir, agent: str, project_id: str,
     have been spawned by the supervisor (a systemd user service, PATH without ~/.local/bin),
     so "claude" would be "command not found" in the pane even though the launching shell
     finds it. The agent's own exit leaves a sentinel line and a paused shell behind, so a
-    crash stays readable and the daemon can tell "ended" from "still starting"."""
+    crash stays readable and the daemon can tell "ended" from "still starting".
+
+    The pause must hold in whatever shell tmux runs (the user's login shell): `read -p` is
+    a bash-ism and in zsh it is not a prompt, so the read returns at once and the pane
+    exits, taking a crashing agent's error off screen with it. `printf` for the prompt plus
+    a bare `read` holds in both bash and zsh."""
     cmd = agent_command(agent, project_dir)
-    full_cmd = f"{cmd}; echo '{SESSION_ENDED_SENTINEL}'; read -p 'Press Enter'"
+    full_cmd = (f"{cmd}; echo '{SESSION_ENDED_SENTINEL}'; "
+                f"printf 'Press Enter to close '; read -r _aaw_done")
     env = {"AAW_PROJECT": project_id, "AAW_AGENT": agent, "PATH": os.environ.get("PATH", "")}
     env.update(extra_env or {})
     args = ["new-session", "-d", "-s", session, "-c", str(project_dir)]
