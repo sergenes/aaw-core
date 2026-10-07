@@ -222,6 +222,7 @@ class Supervisor:
         handler = {
             "start_session": self.req_start_session, "stop_session": self.req_stop_session,
             "new_session": self.req_new_session, "fs_browse": self.req_fs_browse, "fs_fetch": self.req_fs_fetch,
+            "fs_attach": self.req_fs_attach,
         }.get(kind)
         if handler is None:
             return {"error": "unknown_request"}
@@ -336,6 +337,27 @@ class Supervisor:
             return {"error": res["error"], "total_chunks": 0}
         return {"mime": res["mime"], "size": res["size"], "total_chunks": len(res["chunks"]),
                 "chunks": [self.encrypt(c) for c in res["chunks"]], "error": ""}
+
+    def req_fs_attach(self, payload: dict) -> dict:
+        """Save an image the phone attached to a prompt and return its local path. This is
+        the file-download channel in reverse: the phone sends encrypted base64 chunks
+        (a downscaled JPEG), we decrypt each, write the image under the attachments dir, and
+        hand back the path (encrypted) for the phone to reference in the prompt it then
+        sends. Nothing is stored on the relay: the request is routed live, not persisted."""
+        if not self.enc_key:
+            return {"error": fs.ERR_DENIED}
+        chunks_enc = payload.get("chunks") or []
+        suffix = payload.get("suffix") or ".jpg"
+        chunks = [self.decrypt(c) for c in chunks_enc]
+        # decrypt() returns "" for a chunk it cannot read (a wrong/re-paired key). If we were
+        # given chunks but none decrypted, the upload is undecryptable here: deny it rather
+        # than silently write an empty file.
+        if chunks_enc and not any(chunks):
+            return {"error": fs.ERR_DENIED}
+        res = fs.save_attachment(chunks, suffix, str(self.settings.attachments_dir))
+        if res["error"]:
+            return {"error": res["error"]}
+        return {"path_enc": self.encrypt(res["path"]), "size": res["size"], "error": ""}
 
     # ── main loop ─────────────────────────────────────────────────────────────
 
