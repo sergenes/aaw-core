@@ -28,7 +28,7 @@ from cryptography.exceptions import InvalidTag
 from aaw_core import encryption
 from aaw_core.config import Settings, load_settings
 from aaw_core.hooks.common import desktop_banner, read_key, set_mobile_mode
-from aaw_core.host import fs, hooks_installer, sessions
+from aaw_core.host import fs, hooks_installer, mempressure, sessions
 from aaw_core.host.identity import load_identity
 from aaw_core.host.session_id import resolve
 from aaw_core.transport.relay import RelayTransport
@@ -38,6 +38,9 @@ WATCHDOG_EVERY = 30
 STOPPED_STREAK = 4  # ~2 min at the watchdog cadence before a missing session is written stopped
 STUCK_COMMAND_AGE = 90
 SUPERVISOR_PROJECT = "_supervisor"  # its own channel on the relay; never a session id
+MEMORY_PRESSURE_NOTICE = ("{name} is critically low on memory: agent sessions may freeze "
+                          "or be killed. Close heavy apps (emulators, simulators, browsers) "
+                          "to recover.")
 
 
 def platform_name() -> str:
@@ -55,6 +58,8 @@ class Supervisor:
         self.pending_since: dict[str, float] = {}
         self.alerted_questions: set[str] = set()
         self.computer_name = settings.computer_name
+        self.pressure = mempressure.PressureMonitor()
+        self.memory_critical = False  # set by check_memory_pressure, read by restart_stuck
 
     # ── logging ───────────────────────────────────────────────────────────────
 
@@ -175,6 +180,11 @@ class Supervisor:
 
     def restart_stuck(self) -> None:
         """A live session whose oldest unconsumed command is old has a wedged daemon."""
+        if self.memory_critical:
+            # Under critical memory pressure a slow daemon is the machine thrashing, not a
+            # wedge; restarting it would pile more load on and the command is not really
+            # stuck. Stand down until pressure clears (seen live 2026-10-01).
+            return
         for s in sessions.list_sessions():
             try:
                 docs = self.transport.list_commands(s.project)
@@ -215,6 +225,30 @@ class Supervisor:
             self.alerted_questions.clear()
 
     # ── phone requests ────────────────────────────────────────────────────────
+
+    def check_memory_pressure(self) -> None:
+        """Sample pressure; warn the phone once on sustained critical, badge the computer
+        document, and clear both on recovery. Also flips self.memory_critical so the stuck
+        watchdog stands down during an episode."""
+        should_warn, is_critical, should_clear = self.pressure.tick()
+        self.memory_critical = is_critical
+        if should_warn:
+            self.log("memory pressure critical: warning the phone and badging the computer")
+            try:
+                self.transport.write_notification(
+                    MEMORY_PRESSURE_NOTICE.format(name=self.computer_name), level="warning")
+            except Exception as e:  # noqa: BLE001
+                self.log(f"could not send the memory-pressure notice: {e}")
+            try:
+                self.transport.update_computer(memory_pressure="critical")
+            except Exception as e:  # noqa: BLE001
+                self.log(f"could not badge the computer: {e}")
+        elif should_clear:
+            self.log("memory pressure back to normal; clearing the badge")
+            try:
+                self.transport.update_computer(memory_pressure="")
+            except Exception as e:  # noqa: BLE001
+                self.log(f"could not clear the computer badge: {e}")
 
     def handle_request(self, kind: str, payload: dict) -> dict:
         """Answer one request. Every error is a result code the phone renders; nothing
@@ -380,8 +414,9 @@ class Supervisor:
             if now - last_wd >= WATCHDOG_EVERY:
                 last_wd = now
                 self.refresh_cache()
-                for duty in (self.restart_orphans, self.reconcile_stopped, self.restart_stuck,
-                             self.check_waiting_alerts):
+                # Pressure first, so memory_critical is current before restart_stuck reads it.
+                for duty in (self.check_memory_pressure, self.restart_orphans, self.reconcile_stopped,
+                             self.restart_stuck, self.check_waiting_alerts):
                     try:
                         duty()
                     except Exception as e:  # noqa: BLE001 - one failed duty must not stop the others

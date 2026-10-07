@@ -23,9 +23,13 @@ class FakeTransport:
         self.computer_updates: list[dict] = []
         self.project_writes: list[tuple[str, dict]] = []
         self.commands: dict[str, list] = {}
+        self.notifications: list[tuple[str, str]] = []
 
     def update_computer(self, **fields):
         self.computer_updates.append(fields)
+
+    def write_notification(self, message, level, set_running=False):
+        self.notifications.append((message, level))
 
     def list_projects(self):
         return self.projects
@@ -162,6 +166,49 @@ def test_restart_stuck_only_for_old_unconsumed_prompts(sup, monkeypatch):
     sup.transport.commands = {"p": [{"type": "command", "ts": now_ms - 120_000}]}
     sup.restart_stuck()
     assert restarted == ["p"]
+
+
+def _drive_pressure(sup, levels):
+    """Feed the monitor a fixed sequence of samples on a controllable clock."""
+    from aaw_core.host import mempressure
+    seq = iter(levels)
+    clock = [0.0]
+    sup.pressure = mempressure.PressureMonitor(sampler=lambda: next(seq), now=lambda: clock[0])
+    return clock
+
+
+def test_memory_pressure_warns_once_badges_and_clears(sup):
+    # two critical samples (SUSTAIN=2) warn once and badge; a later normal clears.
+    clock = _drive_pressure(sup, ["critical", "critical", "critical", "normal"])
+    sup.check_memory_pressure()
+    assert sup.memory_critical is True
+    assert sup.transport.notifications == []  # one critical sample: not sustained yet
+    sup.check_memory_pressure()
+    assert len(sup.transport.notifications) == 1
+    msg, level = sup.transport.notifications[0]
+    assert "box" in msg and "memory" in msg and level == "warning"
+    assert {"memory_pressure": "critical"} in sup.transport.computer_updates
+    sup.check_memory_pressure()  # still critical, inside REPEAT_EVERY: no second push
+    assert len(sup.transport.notifications) == 1
+    clock[0] += 10
+    sup.check_memory_pressure()  # normal now: badge cleared, flag down
+    assert sup.memory_critical is False
+    assert {"memory_pressure": ""} in sup.transport.computer_updates
+
+
+def test_restart_stuck_stands_down_under_memory_pressure(sup, monkeypatch):
+    import time
+    monkeypatch.setattr(sessions, "list_sessions", lambda: [sessions.Session("aaw-p", "p", "/tmp", False)])
+    restarted = []
+    monkeypatch.setattr(sessions, "start_daemon", lambda s, d, pid, agent: restarted.append(pid) or [])
+    now_ms = int(time.time() * 1000)
+    sup.transport.commands = {"p": [{"type": "command", "ts": now_ms - 120_000}]}
+    sup.memory_critical = True
+    sup.restart_stuck()
+    assert restarted == []  # an old command under pressure is thrashing, not wedged
+    sup.memory_critical = False
+    sup.restart_stuck()
+    assert restarted == ["p"]  # once pressure clears, the real stuck check runs
 
 
 def test_heartbeat_reports_platform_and_agents(sup):
