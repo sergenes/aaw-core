@@ -67,6 +67,20 @@ def test_qr_payload_creates_identity_and_key(tmp_path):
     assert oct(settings.session_key_file.stat().st_mode & 0o777) == "0o600"
 
 
+def test_deep_link_round_trips_the_qr_payload(tmp_path):
+    import base64
+    settings = Settings(state_dir=tmp_path, relay_url="wss://relay.example/v1/ws", computer_name="box",
+                        keep_awake=False)
+    payload = cli.qr_payload(settings, "phone-token")
+    link = cli.deep_link(payload)
+    assert link.startswith("agentsatwork://link?d=")
+    enc = link.split("d=", 1)[1]
+    # a url-safe-base64 value never needs escaping in a URL (the app re-pads before decoding)
+    assert "/" not in enc and "+" not in enc and "=" not in enc
+    decoded = base64.urlsafe_b64decode(enc + "=" * (-len(enc) % 4)).decode()
+    assert json.loads(decoded) == json.loads(payload)
+
+
 def test_configure_relay_offers_the_hosted_relay_and_saves_the_choice(tmp_path, monkeypatch):
     monkeypatch.setenv("AAW_STATE_DIR", str(tmp_path))
     monkeypatch.delenv("AAW_RELAY_URL", raising=False)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 
 from aaw_core.host import detect
 
@@ -279,3 +280,25 @@ def test_resumes_conversation_matches_agent_command(tmp_path, monkeypatch):
     for agent in ("codex", "gemini", "grok", "cursor"):
         assert not tmux.resumes_conversation(agent, project)  # always a fresh conversation
     assert not tmux.resumes_conversation("claude", None)
+
+
+def test_create_session_pause_holds_in_zsh_not_just_bash(tmp_path, monkeypatch):
+    """A crashing agent must leave its error on screen. `read -p` is a bash-ism that in zsh
+    returns at once, so the pane would exit and the crash vanish (seen live: a broken codex
+    binary). The launch command must use a portable pause instead."""
+    from aaw_core.host import tmux
+
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["cmd"] = args[-1]  # the full command string is the last arg
+        return subprocess.CompletedProcess(args, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(tmux, "tmux_run", fake_run)
+    ok, err = tmux.create_session("aaw-p", str(tmp_path), "codex", "p")
+    assert ok and err == ""
+    cmd = captured["cmd"]
+    assert "read -p" not in cmd           # the bash-ism is gone
+    assert "printf 'Press Enter" in cmd   # a portable prompt
+    assert "read -r" in cmd               # a bare read that blocks in bash and zsh
+    assert tmux.SESSION_ENDED_SENTINEL in cmd
