@@ -254,6 +254,17 @@ def test_last_logged_assistant_message(tmp_path):
     assert detect.last_logged_assistant_message(log) == "last"
 
 
+def test_codex_update_dialog_owns_the_keyboard():
+    # Seen 2026-09-05 on a brew-installed Codex; a phone message typed into it picked
+    # "Update now" and ran brew upgrade.
+    pane = ("Update available: 0.141.0 -> 0.153.4\n  1. Update now (runs brew upgrade --cask codex)\n"
+            "  2. Skip\n  3. Skip until next version\nPress enter to continue\n")
+    assert detect.detect_codex_update_dialog(pane)
+    assert detect.dialog_is_open(pane, "codex")
+    assert not detect.dialog_is_open(pane, "claude")  # Claude never draws it
+    assert not detect.detect_codex_update_dialog("› Ask Codex to do anything\n")
+
+
 def test_dialog_is_open():
     assert detect.dialog_is_open(PERM_PANE, "claude")
     assert detect.dialog_is_open(AQ_PANE, "claude")

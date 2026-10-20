@@ -505,6 +505,13 @@ def has_scoot_history(project_dir: Path) -> bool:
     return False
 
 
+def detect_codex_update_dialog(pane: str) -> bool:
+    """Codex's startup "Update available" menu (brew installs: "1. Update now / 2. Skip /
+    3. Skip until next version"). The installer turns the check off in the Codex config,
+    so this is the backstop for a config the user restored or a Codex that ignored it."""
+    return "Update now" in pane and ("Skip until next version" in pane or "Press enter to continue" in pane)
+
+
 def dialog_is_open(pane: str, agent: str) -> bool:
     """A prompt that owns the keyboard is on screen, so typed text would go into it."""
     return bool(
@@ -513,4 +520,5 @@ def dialog_is_open(pane: str, agent: str) -> bool:
         or detect_multiselect_prompt(pane)
         or (agent == "claude" and detect_claude_trust_dialog(pane))
         or (agent == "cursor" and detect_cursor_native_prompt(pane))
+        or (agent == "codex" and detect_codex_update_dialog(pane))
     )
