@@ -39,10 +39,13 @@ def test_restart_that_resumes_keeps_the_feed(monkeypatch, tmp_path):
     assert calls == ["status=running", "update=['background_agents']"]
 
 
-def test_restart_that_starts_fresh_clears_the_feed(monkeypatch, tmp_path):
+def test_restart_that_starts_fresh_clears_the_feed_and_the_summary(monkeypatch, tmp_path):
+    # The summary line goes with the feed: the previous conversation's "Claude is waiting
+    # for your input" must not head a fresh session (seen on Gemini and Scoot sessions in
+    # folders that ran Claude before; those agents never write a summary of their own).
     calls = _restart(monkeypatch, tmp_path, resumed=False)
     assert calls == ["clear_events", "init_local_log(reconnect=False)",
-                     "status=running", "update=['background_agents']"]
+                     "status=running", "update=['background_agents', 'last_event_summary']"]
 
 
 # ── stale commands: the age cap on deliver-on-reconnect ─────────────────────
