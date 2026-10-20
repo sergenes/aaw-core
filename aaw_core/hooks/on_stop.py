@@ -11,6 +11,8 @@ import sys
 
 from aaw_core.hooks import on_stop_claude, on_stop_cursor, on_stop_gemini, on_stop_grok
 from aaw_core.hooks.common import hook_log, notify, open_transport, preamble, read_payload, tmux_session
+from aaw_core.hooks.on_subagent import reconcile_subagents, remember_transcript
+from aaw_core.hooks.on_user_prompt import strip_paste_markers
 from aaw_core.transport.utils import clean_box_tables
 
 LIMIT_KEYWORDS = on_stop_claude.LIMIT_KEYWORDS
@@ -78,7 +80,8 @@ def main() -> int:
                 hook_log(settings, "on_stop", "transport is None (not linked?)")
             else:
                 if user_prompt:
-                    transport.write_event("message", {"role": "user", "content": user_prompt, "agent": agent})
+                    transport.write_event("message", {"role": "user", "content": strip_paste_markers(user_prompt),
+                                                      "agent": agent})
                 if response_text:
                     transport.write_event("message", {"role": "assistant", "content": clean_box_tables(response_text),
                                                       "agent": agent})
@@ -90,6 +93,14 @@ def main() -> int:
                             transport.write_event("reminder", {"reset_at": reset_unix, "reset_label": reset_label,
                                                                "agent": agent})
                 transport.set_project_status("stopped" if is_final_stop else "idle", pending_question_id="")
+                if agent == "claude":
+                    # A background agent that died on a usage limit sends no SubagentStop;
+                    # Claude's own record of it does say finished.
+                    transcript_path = str(payload.get("transcript_path") or "")
+                    remember_transcript(settings, project, transcript_path)
+                    ids = reconcile_subagents(settings, project, transcript_path or None)
+                    if ids is not None:
+                        transport.update_project(background_agents=ids)
         else:
             # The stop carries an error reason: forward what is in the pane (e.g. "API Error:
             # SSO session expired") so the phone sees it.

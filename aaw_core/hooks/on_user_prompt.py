@@ -16,6 +16,23 @@ from aaw_core.hooks.common import open_transport, preamble, read_payload
 # in <agent-message>. Not the user's words, so they never reach the feed.
 SYNTHETIC_PROMPT_PREFIXES = ("<task-notification>", "<agent-message")
 
+# Claude Code wraps each block pasted into the terminal in <pasted_content id="..."> ...
+# </pasted_content id="..."> (a random id per paste, repeated on the closing tag) before
+# the prompt reaches the hook. Markup, not the user's words: the phone shows the pasted
+# text itself, with whatever was typed around it.
+_MARKER = r"</?pasted_content(?:[ \t]+id=\"[^\"]*\")?[ \t]*>"
+# A marker alone on its line goes with the line; one inside a line goes alone.
+_PASTE_MARKER_LINE = re.compile(r"^[ \t]*" + _MARKER + r"[ \t]*\n?", re.IGNORECASE | re.MULTILINE)
+_PASTE_MARKER = re.compile(_MARKER, re.IGNORECASE)
+
+
+def strip_paste_markers(text: str) -> str:
+    """The prompt without Claude Code's <pasted_content> wrappers, every pair; the pasted
+    text and whatever was typed around it stay as they were."""
+    if "pasted_content" not in text:
+        return text
+    return _PASTE_MARKER.sub("", _PASTE_MARKER_LINE.sub("", text)).strip()
+
 
 def user_prompt_from(payload: dict, agent: str) -> str:
     """The prompt text worth showing, or "" for slash commands and synthetic turns."""
@@ -24,7 +41,7 @@ def user_prompt_from(payload: dict, agent: str) -> str:
         text = re.sub(r"</?user_query>", "", text, flags=re.IGNORECASE).strip()
     if not text or text.startswith("/") or text.startswith(SYNTHETIC_PROMPT_PREFIXES):
         return ""
-    return text
+    return strip_paste_markers(text)
 
 
 def main() -> int:
