@@ -385,6 +385,47 @@ def test_grok_pane_extractor():
     assert on_stop_grok.grok_clean("▌hello▐ ") == "hello"
 
 
+class _ModelTransport:
+    def __init__(self):
+        self.updates: list[dict] = []
+        self.cleared = False
+
+    def update_project(self, **fields):
+        self.updates.append(fields)
+
+    def clear_events(self):
+        self.cleared = True
+
+    def stop(self):
+        pass
+
+
+def test_session_start_restamps_or_clears_the_model_for_claude_and_codex(settings, monkeypatch, tmp_path):
+    """A folder that ran scoot kept scoot's model on the doc, and the Claude session that
+    replaced it showed "gpt-6-astra" for days. A resumed session names its model in the
+    transcript; a fresh one has none and the first turn's Stop hook fills it in."""
+    t = tmp_path / "resumed.jsonl"
+    t.write_text(json.dumps({"type": "assistant", "message": {"role": "assistant", "model": "claude-opus-5-5"}}))
+    calls = []
+
+    def run(agent, payload):
+        transport = _ModelTransport()
+        monkeypatch.setattr(on_session_start, "preamble", lambda: (settings, "p", agent))
+        monkeypatch.setattr(on_session_start, "read_payload", lambda: payload)
+        monkeypatch.setattr(on_session_start, "open_transport", lambda s, p: transport)
+        assert on_session_start.main() == 0
+        calls.append(transport)
+        return transport
+
+    assert run("claude", {"source": "resume", "transcript_path": str(t)}).updates == [{"model": "claude-opus-5-5"}]
+    assert run("claude", {"source": "startup", "transcript_path": str(tmp_path / "fresh.jsonl")}).updates == [{"model": ""}]
+    assert run("codex", {"source": "startup"}).updates == [{"model": ""}]
+    assert run("claude", {"source": "compact", "transcript_path": str(t)}).updates == []  # mid-session: untouched
+    cleared = run("claude", {"source": "clear", "transcript_path": str(t)})
+    assert cleared.cleared and cleared.updates == []
+    assert run("gemini", {"source": "startup"}).updates == []  # no transcript model for gemini yet
+
+
 def test_scoot_model_prefers_env_then_newest_session_file(monkeypatch, tmp_path):
     monkeypatch.setenv("SCOOT_MODEL", "ollama/qwen2.5")
     assert on_session_start.scoot_model() == "ollama/qwen2.5"
