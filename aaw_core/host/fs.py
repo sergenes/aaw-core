@@ -155,7 +155,7 @@ def _sips_preview(src: str, max_px: int) -> bytes | None:
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=True) as tmp:
             r = subprocess.run(["sips", "-s", "format", "jpeg", "-s", "formatOptions", "80",
                                 "-Z", str(max_px), src, "--out", tmp.name],
-                               capture_output=True, timeout=30)
+                               capture_output=True, timeout=30, check=False)
             if r.returncode != 0:
                 return None
             with open(tmp.name, "rb") as f:
