@@ -37,11 +37,21 @@ def _md5(text: str) -> str:
 # ── Claude Code permission prompt (numbered Yes / No menu) ──────────────────
 
 
+# The trailing rows of every AskUserQuestion picker (single- and multi-select).
+_AQ_META_ROW = re.compile(r"^(?:\[[ xX]\]\s+)?(?:type something\.?|chat about this)$", re.IGNORECASE)
+
+
 def detect_permission_prompt(content: str) -> dict | None:
     """Claude Code's numbered permission menu ("1. Yes / 2. Yes, and don't ask again /
     3. No"), which waits for a single keypress. Returns {question, options, hash,
     structure} or None."""
     lines = content.split("\n")
+    # An AskUserQuestion picker is also a numbered menu with a ❯ cursor, so it satisfied
+    # this detector first and the phone got a card with the picker's meta rows as options
+    # and nearby prose as the question (seen through Claude Code 2.1.303). It has its own
+    # footer and its own detectors; it is never a permission prompt.
+    if _footer_index(lines) is not None:
+        return None
     opt_re = re.compile(r"^\s*(❯\s*)?(\d+)[.)]\s+(.+)")
     found = []  # (line index, number, text, has cursor)
     for i, line in enumerate(lines):
@@ -75,6 +85,8 @@ def detect_permission_prompt(content: str) -> dict | None:
             return None
 
     option_texts = [f[2] for f in found]
+    if any(_AQ_META_ROW.match(t) for t in option_texts):
+        return None  # an AskUserQuestion picker whose footer scrolled out of the capture
     has_yes = any(re.match(r"yes\b", t, re.IGNORECASE) for t in option_texts)
     has_no = any(re.match(r"no\b", t, re.IGNORECASE) for t in option_texts)
     # The ❯ cursor never appears on a line Claude prints as prose, so it alone marks a
