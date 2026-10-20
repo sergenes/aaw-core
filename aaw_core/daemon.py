@@ -199,7 +199,10 @@ def handle_command(cmd: dict, transport: RelayTransport, settings: Settings, *, 
             transport.init_local_log(is_reconnect=False)
         update_subagents(settings, project_id, clear=True)
         transport.set_project_status("running", pending_question_id="")
-        transport.update_project(background_agents=[])
+        if resumed:
+            transport.update_project(background_agents=[])
+        else:
+            transport.update_project(background_agents=[], last_event_summary="")
 
     def stop() -> None:
         tmux.tmux_run(["kill-session", "-t", session], capture_output=True)
@@ -327,7 +330,10 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
         if not is_reconnect:
             transport.clear_events()
             update_subagents(settings, project_id, clear=True)
-            transport.update_project(background_agents=[])
+            # The summary too: a folder that ran Claude before would otherwise show
+            # "Claude is waiting for your input" on its new Gemini or Scoot session for
+            # as long as it lives (those agents never write a summary of their own).
+            transport.update_project(background_agents=[], last_event_summary="")
         transport.init_local_log(is_reconnect)
         transport.set_project_status("running", pending_question_id="" if not is_reconnect else None)
         transport.update_computer(status="running", daemon_version=__version__)
