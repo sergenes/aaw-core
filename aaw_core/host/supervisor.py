@@ -19,6 +19,7 @@ import os
 import queue
 import signal
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +39,9 @@ WATCHDOG_EVERY = 30
 STOPPED_STREAK = 4  # ~2 min at the watchdog cadence before a missing session is written stopped
 STUCK_COMMAND_AGE = 90
 SLOW_DUTY_S = 2.0  # a watchdog duty slower than this is logged, so a slow relay or tmux shows up
+# Requests that start or stop a daemon share the session lock with the watchdog's duties;
+# the file requests do not touch sessions and are answered at once, whatever the duties do.
+SESSION_REQUESTS = frozenset({"start_session", "stop_session", "new_session"})
 SUPERVISOR_PROJECT = "_supervisor"  # its own channel on the relay; never a session id
 MEMORY_PRESSURE_NOTICE = ("{name} is critically low on memory: agent sessions may freeze "
                           "or be killed. Close heavy apps (emulators, simulators, browsers) "
@@ -52,6 +56,7 @@ class Supervisor:
     def __init__(self, settings: Settings, *, transport: RelayTransport | None = None):
         self.settings = settings
         self.running = True
+        self.session_lock = threading.Lock()  # daemons are started by duties and by requests
         self.transport = transport
         self.enc_key = read_key(settings)
         self.cache: dict[str, dict] = {}  # project id -> {status, agent, path, pending_question_id}
@@ -187,7 +192,6 @@ class Supervisor:
             # stuck. Stand down until pressure clears (seen live 2026-10-01).
             return
         for s in sessions.list_sessions():
-            self.serve_requests()  # each session is a relay round trip; the phone is not kept waiting
             try:
                 docs = self.transport.list_commands(s.project)
             except Exception as e:  # noqa: BLE001 - the relay may be away; try the next session
@@ -254,10 +258,11 @@ class Supervisor:
 
     def serve_requests(self, wait: float = 0.0) -> None:
         """Answer every phone request waiting in the transport's queue (the first may be
-        waited for up to ``wait`` seconds). Called by the loop each turn and between the
-        watchdog's duties: those make relay round trips per session, and a folder listing
-        or a file the phone asked for used to wait behind all of them (6 to 20 s measured
-        on 2026-10-20 with nine sessions)."""
+        waited for up to ``wait`` seconds). Runs on its own thread (_serve_loop): the
+        watchdog's duties make relay round trips and tmux calls for every session, and a
+        folder listing or a file the phone asked for used to wait behind all of them (6 to
+        20 s measured on 2026-10-20 with nine sessions). A request that starts or stops a
+        daemon takes the session lock the duties hold, so the two never race."""
         requests = getattr(self.transport, "requests", None)
         if requests is None:
             return
@@ -269,9 +274,21 @@ class Supervisor:
                 return
             block = False  # only the first get waits; the rest drain what is there
             payload = frame.get("payload") or {}
-            reply = self.handle_request(frame.get("kind") or "", payload)
+            kind = frame.get("kind") or ""
+            if kind in SESSION_REQUESTS:
+                with self.session_lock:
+                    reply = self.handle_request(kind, payload)
+            else:
+                reply = self.handle_request(kind, payload)
             for part in (self.response_parts(reply) if payload.get("parts") else [reply]):
                 self.transport.respond(frame, part)
+
+    def _serve_loop(self) -> None:
+        while self.running:
+            try:
+                self.serve_requests(wait=1)
+            except Exception as e:  # noqa: BLE001 - one bad request must not end the thread
+                self.log(f"request thread: {e}")
 
     def handle_request(self, kind: str, payload: dict) -> dict:
         """Answer one request. Every error is a result code the phone renders; nothing
@@ -464,10 +481,11 @@ class Supervisor:
         self.refresh_cache()
         self.restart_all_daemons()
 
+        threading.Thread(target=self._serve_loop, name="aaw-requests", daemon=True).start()
         last_hb = time.time()
         last_wd = time.time()
         while self.running:
-            self.serve_requests(wait=1)
+            time.sleep(1)
             now = time.time()
             if now - last_hb >= HEARTBEAT_EVERY:
                 self.settings.enabled_flag.write_text(str(int(now)))
@@ -481,13 +499,12 @@ class Supervisor:
                              self.restart_stuck, self.check_waiting_alerts):
                     started = time.time()
                     try:
-                        duty()
+                        with self.session_lock:
+                            duty()
                     except Exception as e:  # noqa: BLE001 - one failed duty must not stop the others
                         self.log(f"{duty.__name__} failed: {e}")
                     if time.time() - started > SLOW_DUTY_S:
                         self.log(f"{duty.__name__} took {time.time() - started:.1f} s")
-                    # The phone is waiting on nothing the duties do: answer it between them.
-                    self.serve_requests()
 
         self.log("supervisor stopping")
         try:

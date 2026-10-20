@@ -110,6 +110,27 @@ def test_serve_requests_drains_the_queue_and_splits_parts(sup, monkeypatch):
     assert 0.15 < time.time() - t0 < 1.0
 
 
+def test_file_requests_do_not_wait_for_the_session_lock_but_session_requests_do(sup, monkeypatch):
+    import queue as q
+    import threading
+    import time
+
+    sup.transport.requests = q.Queue()
+    sup.transport.responses = []
+    monkeypatch.setattr(sup, "req_start_session", lambda payload: {"result": "started"})
+    with sup.session_lock:  # a watchdog duty is running
+        sup.transport.requests.put({"req": "browse", "kind": "fs_browse", "payload": {}})
+        sup.serve_requests()
+        assert [r for r, _ in sup.transport.responses] == ["browse"]
+        sup.transport.requests.put({"req": "start", "kind": "start_session", "payload": {"project_id": "p"}})
+        worker = threading.Thread(target=sup.serve_requests, daemon=True)
+        worker.start()
+        time.sleep(0.3)
+        assert [r for r, _ in sup.transport.responses] == ["browse"]  # still waiting for the duty
+    worker.join(timeout=2)
+    assert [r for r, _ in sup.transport.responses] == ["browse", "start"]
+
+
 def test_fs_fetch_in_parts_splits_a_chunked_reply_into_one_frame_per_chunk(sup, monkeypatch):
     from aaw_core.host import supervisor as sv
 
