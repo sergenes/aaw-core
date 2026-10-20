@@ -81,3 +81,15 @@ def test_stale_notice_ages_scheduled_prompts_from_deliver_at():
 
 def test_stale_notice_without_any_timestamp_is_fresh():
     assert daemon.stale_notice({"payload": {"args": "hi"}}, now_s=1_700_000_000.0) is None
+
+
+def test_answer_keys_walk_the_cursor_past_option_nine():
+    """A digit picks options 1 to 9 at once. "10" would be the keys 1 and 0, and the 1 alone
+    picks the first option (the /model picker lists up to ten models), so later options are
+    reached with arrow keys from where the capture saw the cursor, then Enter."""
+    assert daemon.answer_keys(0, 0) == ["1"]
+    assert daemon.answer_keys(8, None) == ["9"]
+    assert daemon.answer_keys(9, 1) == ["Down"] * 8 + ["Enter"]
+    assert daemon.answer_keys(9, 11) == ["Up"] * 2 + ["Enter"]
+    assert daemon.answer_keys(9, 9) == ["Enter"]
+    assert daemon.answer_keys(9, None) == ["10"]  # no cursor seen: the digit is the best left

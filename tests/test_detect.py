@@ -88,6 +88,37 @@ Which color do you prefer?
 Enter to select · ↑/↓ to navigate · Esc to cancel
 """
 
+# Claude Code 2.1.303's /model picker in an 80x24 pane on a headless Linux box, captured
+# live: two visible rows, ↓ on the last one (more below, cursor not on it), ✔ on the current
+# choice, no "Enter to select" footer.
+MODEL_PICKER_PANE = """\
+✻ Churned for 9s · done 5:53 PM
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Select model
+   Switch between Claude models. Your pick becomes the default for new
+   sessions. For other/previous model names, specify with --model.
+
+   ❯ 1. Default (recommended) ✔  Opus 5.5 · Best for everyday, complex tasks
+   ↓ 2. Opus                     Opus 5.5 · Best for everyday, complex tasks
+      … +3 models
+
+   ◐ Medium effort (default) ←/→ to adjust
+
+   Use /fast to turn on Fast mode (Opus 5.5).
+
+   Enter to set as default · s to use this session only · Esc to cancel
+"""
+
+AQ_SCROLLING_PANE = """\
+Which city?
+
+     1. Austin
+   ❯ 2. Boston
+     3. Chicago
+   ↓ 4. Denver
+Enter to select · ↑↓ to navigate · Esc to cancel
+"""
+
 CURSOR_SHELL_PANE = """\
 Run this command?
 Not in allowlist: cd, printf, python3
@@ -153,6 +184,23 @@ def test_permission_detector_leaves_ask_user_question_pickers_alone():
     # Real permission menus and the plan menu are untouched.
     assert detect.detect_permission_prompt(PERM_PANE) is not None
     assert detect.detect_permission_prompt(PLAN_MENU_PANE) is not None
+
+
+def test_scrolling_menus_count_their_edge_rows():
+    """A scrolling menu marks its first or last visible row with ↑ or ↓ in the cursor
+    column. The /model picker on a headless box (80x24, two visible rows, ↓ on row 2) was
+    one option to the detector, so no menu: /model from the phone showed nothing."""
+    perm = detect.detect_permission_prompt(MODEL_PICKER_PANE)
+    assert perm is not None
+    assert [o.split("  ")[0] for o in perm["options"]] == ["Default (recommended)", "Opus"]
+    assert "✔" not in perm["options"][0]  # the current-choice mark is not part of the name
+    assert perm["cursor"] == 0
+    assert perm["question"].startswith("Switch between Claude models.")  # the card's text
+    aq = detect.detect_ask_user_question(AQ_SCROLLING_PANE)
+    assert aq is not None
+    assert aq["options"] == ["Austin", "Boston", "Chicago", "Denver"]
+    # A plain permission menu reports the cursor too; the plan menu has it on row 1.
+    assert detect.detect_permission_prompt(PERM_PANE)["cursor"] == 0
 
 
 def test_multiselect_is_left_to_the_chat_about_this_fallback():
@@ -343,12 +391,17 @@ def test_create_session_pause_holds_in_zsh_not_just_bash(tmp_path, monkeypatch):
     captured = {}
 
     def fake_run(args, **kwargs):
+        captured["args"] = args
         captured["cmd"] = args[-1]  # the full command string is the last arg
         return subprocess.CompletedProcess(args, 0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(tmux, "tmux_run", fake_run)
     ok, err = tmux.create_session("aaw-p", str(tmp_path), "codex", "p")
     assert ok and err == ""
+    # A detached session defaults to 80x24 and Claude Code folds its pickers to fit
+    # ("… +9 models" on a headless box); an explicit size gives them room.
+    args = captured["args"]
+    assert args[args.index("-x") + 1] == "200" and args[args.index("-y") + 1] == "50"
     cmd = captured["cmd"]
     assert "read -p" not in cmd           # the bash-ism is gone
     assert "printf 'Press Enter" in cmd   # a portable prompt

@@ -245,6 +245,17 @@ def handle_command(cmd: dict, transport: RelayTransport, settings: Settings, *, 
 # ── Claude Code diagnostics ─────────────────────────────────────────────────
 
 
+def answer_keys(index: int, cursor: int | None) -> list[str]:
+    """The keys that pick option `index` of a Claude Code menu. A digit picks options 1 to 9
+    at once. Past that, "10" would be the keys 1 and 0, and the 1 alone picks the first
+    option (seen with the /model picker, which lists up to ten models), so the answer walks
+    the cursor there with arrow keys from where the capture saw it and presses Enter."""
+    if index < 9 or cursor is None:
+        return [str(index + 1)]
+    step = "Down" if index > cursor else "Up"
+    return [step] * abs(index - cursor) + ["Enter"]
+
+
 def check_claude_ui_version(settings: Settings, prompt: dict) -> None:
     """Record the Claude Code version + prompt structure; warn when either changes,
     since that is when the pane detectors need re-verification."""
@@ -351,6 +362,7 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
     perm_question_id: str | None = None
     perm_hash: str | None = None
     perm_options: list = []
+    perm_cursor: int | None = None  # the option the ❯ cursor sat on when the prompt was read
     # Claude's "trust this folder" dialog (first open of a folder)
     trust_question_id: str | None = None
     trust_hash: str | None = None
@@ -492,6 +504,7 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
                 if perm and perm["hash"] != perm_hash:
                     check_claude_ui_version(settings, perm)
                     perm_hash, perm_first_seen, perm_options = perm["hash"], time.monotonic(), perm["options"]
+                    perm_cursor = perm.get("cursor")
                     if auto_approve() and detect.is_yes_no_shaped(perm["options"]):
                         tmux.send_keys(session, "1")  # first option: Yes
                         perm_question_id = None
@@ -695,13 +708,14 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
                 answer = transport.poll_perm_answer_once(perm_question_id)
                 if answer is not None:
                     try:
-                        key = str(perm_options.index(answer) + 1)
+                        index = perm_options.index(answer)
                     except ValueError:
-                        key = "1"
-                    tmux.send_keys(session, key)  # a single digit, no Enter
+                        index = 0
+                    key = answer_keys(index, perm_cursor)
+                    tmux.send_keys(session, *key)
                     transport.set_project_status("running", pending_question_id="")
                     set_mobile_mode(settings)
-                    log(f"phone answered {answer!r}: sent key {key!r}")
+                    log(f"phone answered {answer!r}: sent {' '.join(key)!r}")
                     perm_question_id, perm_options = None, []  # perm_hash stays until the pane is clean
                     flush_pending_message(transport, session, agent)
 
@@ -795,7 +809,7 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
                         else:
                             perm_question_id = send_question(stuck["question"], stuck["options"], "permission",
                                                              "Claude Code permission prompt")
-                            perm_hash, perm_options = stuck["hash"], stuck["options"]
+                            perm_hash, perm_options, perm_cursor = stuck["hash"], stuck["options"], stuck.get("cursor")
                             log(f"phone active: forwarded the stuck prompt ({perm_question_id[:8]})")
                 backoff_until = 0.0
             except Exception as e:  # noqa: BLE001

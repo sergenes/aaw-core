@@ -302,6 +302,31 @@ def test_claude_transcript_latest_entry_only(tmp_path):
     assert "interrupted" in on_stop_claude.friendly_api_error_message("connection", "ECONNRESET")
 
 
+def test_model_from_transcript_per_agent(tmp_path):
+    """The phone shows the model next to the agent. Claude's assistant entries name it;
+    a Codex rollout names it in turn_context (and thread_settings_applied at start). The
+    newest entry wins, so a /model switch shows after the next turn."""
+    t = tmp_path / "claude.jsonl"
+    t.write_text("\n".join([
+        json.dumps({"type": "assistant", "message": {"role": "assistant", "model": "claude-opus-5-5", "content": []}}),
+        json.dumps({"type": "assistant", "message": {"role": "assistant", "model": "claude-fable-5-1", "content": []}}),
+        json.dumps({"type": "assistant", "message": {"role": "assistant", "model": "<synthetic>", "content": []}}),
+        json.dumps({"type": "user", "message": {"role": "user", "content": "hi"}}),
+        "not json",
+    ]))
+    assert on_stop_claude.model_from_transcript(str(t)) == "claude-fable-5-1"
+    c = tmp_path / "rollout.jsonl"
+    c.write_text("\n".join([
+        json.dumps({"type": "event_msg", "payload": {"type": "thread_settings_applied",
+                                                     "thread_settings": {"model": "gpt-5.1"}}}),
+        json.dumps({"type": "turn_context", "payload": {"model": "gpt-6-sol", "cwd": "/x"}}),
+        json.dumps({"type": "response_item", "payload": {"type": "message", "role": "assistant"}}),
+    ]))
+    assert on_stop_claude.model_from_transcript(str(c), "codex") == "gpt-6-sol"
+    assert on_stop_claude.model_from_transcript(str(tmp_path / "missing")) == ""
+    assert on_stop_claude.model_from_transcript("") == ""
+
+
 def test_stray_line_dump_guard():
     assert on_stop_claude.looks_like_stray_line_dump(["   91    def f():", "   92        pass"])
     assert not on_stop_claude.looks_like_stray_line_dump(["   1    first item", "   2    second"])  # a real list

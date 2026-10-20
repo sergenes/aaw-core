@@ -52,12 +52,17 @@ def detect_permission_prompt(content: str) -> dict | None:
     # footer and its own detectors; it is never a permission prompt.
     if _footer_index(lines) is not None:
         return None
-    opt_re = re.compile(r"^\s*(❯\s*)?(\d+)[.)]\s+(.+)")
+    # A scrolling menu (the /model picker, a long AskUserQuestion list) marks the first or
+    # last visible row with ↑ or ↓ in the cursor column. Without the marker in the pattern
+    # that row was invisible to the detector, and a two-row picker with ↓ on row 2 was one
+    # option, so never a menu: /model from the phone showed nothing (Claude Code 2.1.303).
+    # A ✔ marks the current choice and is not part of the option's name.
+    opt_re = re.compile(r"^\s*(❯\s*)?(?:[↑↓]\s*)?(\d+)[.)]\s+(.+)")
     found = []  # (line index, number, text, has cursor)
     for i, line in enumerate(lines):
         m = opt_re.match(line)
         if m:
-            found.append((i, int(m.group(2)), m.group(3).strip(), bool(m.group(1))))
+            found.append((i, int(m.group(2)), re.sub(r"\s*✔", "", m.group(3)).strip(), bool(m.group(1))))
     if len(found) < 2:
         return None
 
@@ -115,11 +120,13 @@ def detect_permission_prompt(content: str) -> dict | None:
         question = " ".join(question_lines[-2:]) if question_lines else "Claude needs permission"
 
     block = "\n".join(lines[max(0, first_idx - 3): last_idx + 2])
+    cursor = next((k for k, f in enumerate(found) if f[3]), None)
     return {
         "question": question,
         "options": option_texts,
         "hash": _md5(block),
         "structure": f"opts={len(found)};nums={','.join(str(n) for n in nums)}",
+        "cursor": cursor,  # index of the option the ❯ cursor sits on (arrow-key answers)
     }
 
 
@@ -200,7 +207,7 @@ def detect_ask_user_question(content: str) -> dict | None:
     footer_idx = _footer_index(lines)
     if footer_idx is None:
         return None
-    opt_re = re.compile(r"^\s*(?:❯\s*)?(\d+)\.\s+(.+)$")
+    opt_re = re.compile(r"^\s*(?:❯\s*)?(?:[↑↓]\s*)?(\d+)\.\s+(.+)$")  # ↑↓: a scrolling list's edge rows
     # A preview panel drawn with box characters to the right of an option would
     # otherwise be captured as part of its text.
     preview_panel_re = re.compile(r"\s{2,}[┌┐└┘│─┬┴├┤┼╭╮╰╯].*$")

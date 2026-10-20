@@ -93,6 +93,12 @@ def main() -> int:
                             transport.write_event("reminder", {"reset_at": reset_unix, "reset_label": reset_label,
                                                                "agent": agent})
                 transport.set_project_status("stopped" if is_final_stop else "idle", pending_question_id="")
+                if agent in ("claude", "codex"):
+                    # The phone shows the model next to the agent; the transcript is the
+                    # truth after a /model switch, which no hook announces.
+                    model = on_stop_claude.model_from_transcript(str(payload.get("transcript_path") or ""), agent)
+                    if model:
+                        transport.update_project(model=model)
                 if agent == "claude":
                     # A background agent that died on a usage limit sends no SubagentStop;
                     # Claude's own record of it does say finished.

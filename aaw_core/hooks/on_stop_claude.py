@@ -56,6 +56,9 @@ def pane_raw(session: str) -> str:
 # ── transcript ──────────────────────────────────────────────────────────────
 
 
+MODEL_TAIL_BYTES = 256 * 1024  # every Claude turn and every Codex turn_context names the model
+
+
 def _latest_real_entry(path_str: str):
     """The transcript's most recent entry with a role, skipping metadata-only lines."""
     path = Path(path_str)
@@ -74,6 +77,39 @@ def _latest_real_entry(path_str: str):
         if msg.get("role") in ("assistant", "user"):
             return entry
     return None
+
+
+def model_from_transcript(path_str: str, agent: str = "claude") -> str:
+    """The model the agent answered with, read from its own transcript, or "" when unknown.
+    Claude's assistant entries carry message.model; a Codex rollout records the model in
+    its turn_context entries (and thread_settings_applied at start). The newest entry
+    wins, so a /model switch shows on the phone after the next turn. Only the file's tail
+    is read: a long session's transcript runs to tens of megabytes."""
+    path = Path(path_str)
+    if not path_str or not path.exists():
+        return ""
+    try:
+        with path.open("rb") as f:
+            f.seek(max(0, path.stat().st_size - MODEL_TAIL_BYTES))
+            lines = f.read().decode("utf-8", errors="replace").split("\n")
+    except OSError:
+        return ""
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if agent == "codex":
+            payload = entry.get("payload") or {}
+            model = payload.get("model") or (payload.get("thread_settings") or {}).get("model")
+        else:
+            msg = entry.get("message") or {}
+            model = msg.get("model") if msg.get("role") == "assistant" else None
+        if isinstance(model, str) and model and not model.startswith("<"):  # "<synthetic>" is no model
+            return model
+    return ""
 
 
 def response_from_transcript(path_str: str) -> str:
