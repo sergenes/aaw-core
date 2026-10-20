@@ -58,3 +58,26 @@ def test_transport_mirrors_pushable_alerts(tmp_path):
     eid = t.write_event("notification", {"message": "Response ready: done", "level": "success"})
     alert = state.read_project(tmp_path / "projects", "proj")["last_alert"]
     assert alert["id"] == eid and alert["level"] == "success" and alert["message"] == "Response ready: done"
+
+
+def test_activity_time_moves_with_events_not_with_status_changes(tmp_path):
+    # Seen on the phone 2026-10-20: three untouched sessions sat above the one in use,
+    # because every daemon restart and idle check had stamped them as just touched.
+    from aaw_core.transport.relay import RelayTransport
+    t = RelayTransport(relay_url="ws://unused", token="t", computer_id="c", project_id="proj",
+                       sessions_dir=tmp_path / "sessions", enc_key=KEY)
+    sent = []
+    t._send = sent.append
+    def stamps():
+        return [f["fields"].get("last_event_ts") for f in sent if f["type"] == "state"]
+    t.set_project_status("running", pending_question_id="")      # a restart
+    t.set_project_status("idle", pending_question_id="")         # the idle check
+    assert stamps() == [None, None]
+    sent.clear()
+    t.set_project_status("running", last_event_summary="Ran: pytest")  # a tool call
+    assert stamps() == [stamps()[0]] and stamps()[0] is not None
+    sent.clear()
+    t.write_event("message", {"role": "user", "content": "hi"})
+    t.write_event("notification", {"message": "waiting", "level": "info"})
+    assert [f["type"] for f in sent] == ["event", "state", "event"]  # the message stamps, the notice does not
+    assert sent[1]["fields"]["last_event_ts"] is not None

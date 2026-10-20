@@ -63,7 +63,7 @@ Merged field by field (`state` frames); the phone renders the session card from 
 | `agent` | `claude` \| `codex` \| `gemini` \| `grok` \| `cursor` \| `scoot` |
 | `model` | scoot's provider/model, when known |
 | `project_path` | the folder, encrypted |
-| `last_event_ts`, `last_event_summary` | the card's subtitle; the summary is encrypted |
+| `last_event_ts`, `last_event_summary` | the card's subtitle and its "last touched" order; the summary is encrypted. `last_event_ts` moves with activity only (a message, a question, a tool-call summary, a notice, a session start or stop), never with a plain status change such as a restart or an idle check |
 | `pending_question_id` | the event id of the open question, or `""` |
 | `auto_approve` | phone-set: yes/no permission prompts are answered "yes" by the daemon |
 | `pending_message` | a prompt queued while a dialog was open (encrypted by the writer) |
