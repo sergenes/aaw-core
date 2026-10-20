@@ -63,9 +63,30 @@ def test_codex_hooks_and_feature_flag(home):
     assert "[features]\nhooks = true" in cfg
     (home / ".codex" / "config.toml").write_text("[features]\ncodex_hooks = true\n")
     hi.update_codex_hooks()
-    assert (home / ".codex" / "config.toml").read_text() == "[features]\nhooks = true\n"
+    assert (home / ".codex" / "config.toml").read_text() == hi.CODEX_UPDATE_LINE + "\n[features]\nhooks = true\n"
     data = json.loads((home / ".codex" / "hooks.json").read_text())
     assert data["hooks"]["PreToolUse"][0]["matcher"] == "*"
+
+
+def test_codex_update_check_is_turned_off_and_restored_on_uninstall(home):
+    cfg = home / ".codex" / "config.toml"
+    cfg.parent.mkdir()
+    cfg.write_text('model = "gpt-6-sol"\n\n[features]\nhooks = true\n')
+    hi.update_codex_hooks()
+    text = cfg.read_text()
+    # top level: before the first table, so Codex reads it as a root key
+    assert text.startswith(hi.CODEX_UPDATE_LINE + "\n" + 'model = "gpt-6-sol"\n')
+    hi.update_codex_hooks()
+    assert cfg.read_text() == text  # idempotent
+    hi.remove_all()
+    assert cfg.read_text() == 'model = "gpt-6-sol"\n\n[features]\nhooks = true\n'
+    # the user's own setting of the key, either value, is left alone and survives uninstall
+    cfg.write_text("check_for_update_on_startup = true\n")
+    hi.update_codex_hooks()
+    assert cfg.read_text().startswith("check_for_update_on_startup = true\n")
+    hi.remove_all()
+    assert cfg.read_text().startswith("check_for_update_on_startup = true\n")
+    assert hi.with_codex_update_check_off("") == hi.CODEX_UPDATE_LINE + "\n"
 
 
 def test_scoot_keeps_its_file_shape(home):

@@ -230,6 +230,23 @@ def test_user_prompt_filtering():
     assert on_user_prompt.user_prompt_from({}, "claude") == ""
 
 
+def test_claude_paste_markers_are_stripped_from_prompts():
+    # Claude Code wraps each terminal paste in <pasted_content id="..."> ... </pasted_content id="...">,
+    # a random id per paste, repeated on the closing tag (seen 2026-10-18 on the phone as raw tags).
+    one = '<pasted_content id="d3a9">\n(base) % photopush ~/Pictures\n33171 assets\n</pasted_content id="d3a9">'
+    assert on_user_prompt.user_prompt_from({"prompt": one}, "claude") == "(base) % photopush ~/Pictures\n33171 assets"
+    # Typed text around two pastes survives; every pair goes, not only a leading one.
+    two = ('check this:\n<pasted_content id="a1">\nfirst block\n</pasted_content id="a1">\n'
+           'and this:\n<pasted_content id="b2">second block</pasted_content id="b2">\nthanks')
+    assert on_user_prompt.user_prompt_from({"prompt": two}, "claude") == (
+        "check this:\nfirst block\nand this:\nsecond block\nthanks")
+    # A bare closing tag and a prompt with no paste are both fine.
+    assert on_user_prompt.strip_paste_markers('<pasted_content id="x">y</pasted_content>') == "y"
+    assert on_user_prompt.strip_paste_markers("plain text") == "plain text"
+    # The pasted block's own blank lines stay; only the runs the wrappers leave collapse.
+    assert on_user_prompt.strip_paste_markers('<pasted_content id="q">\n\na\n\nb\n\n</pasted_content id="q">') == "a\n\nb"
+
+
 def test_grok_internal_notifications_are_dropped():
     assert on_notification.is_grok_internal("grok", "SessionNotification { session_id: SessionId(1) }")
     assert not on_notification.is_grok_internal("grok", "Waiting for your input")

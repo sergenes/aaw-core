@@ -34,7 +34,7 @@ from aaw_core.hooks.common import (
     tmux_session,
 )
 from aaw_core.hooks.on_stop_cursor import response_from_transcript as cursor_response_from_transcript
-from aaw_core.hooks.on_subagent import update_subagents
+from aaw_core.hooks.on_subagent import reconcile_subagents, update_subagents
 from aaw_core.host import detect, tmux, usage
 from aaw_core.host.identity import load_identity
 from aaw_core.transport.relay import RelayTransport
@@ -47,6 +47,7 @@ UNDELIVERED_NOTICE = ("Your message did not reach the session (tmux was unrespon
 STALE_COMMAND_S = 30 * 60
 COMMAND_POLL_S = 2.0
 HEARTBEAT_S = 30.0
+SUBAGENT_RECONCILE_S = 60.0  # a background agent that died without a SubagentStop clears within this
 LOOP_SLEEP_S = 0.5  # short, so a prompt reaches the phone before the user answers it on the desktop
 
 
@@ -343,6 +344,7 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
     now = time.time()
     last_heartbeat = 0.0
     last_cmd_poll = 0.0
+    last_reconcile = 0.0
     backoff_until = 0.0
 
     # Claude permission prompt state
@@ -406,6 +408,16 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
                 last_heartbeat = now
             except Exception as e:  # noqa: BLE001
                 log(f"heartbeat failed: {e}", err=True)
+
+        if agent == "claude" and now - last_reconcile >= SUBAGENT_RECONCILE_S:
+            last_reconcile = now
+            try:
+                ids = reconcile_subagents(settings, project_id)
+                if ids is not None:
+                    transport.update_project(background_agents=ids)
+                    log(f"background agents reconciled: {len(ids)} still running")
+            except Exception as e:  # noqa: BLE001
+                log(f"subagent reconcile failed: {e}", err=True)
 
         if transport.delete_requested.is_set():
             # The phone removed this session and the relay wiped its rows. Stop the real

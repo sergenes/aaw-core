@@ -65,6 +65,29 @@ MULTI_PANE = """\
   Enter to select · ↑/↓ to navigate · Esc to cancel
 """
 
+# A real capture, Claude Code 2.1.303 (2026-10-20), single-select with descriptions.
+AQ_REAL_PANE = """\
+❯ Use the AskUserQuestion tool once to ask me which color I prefer, with the options Red, Blue and Green. Do nothing
+  else and do not use any other tool.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Color
+
+Which color do you prefer?
+
+❯ 1. Red
+     Choose red
+  2. Blue
+     Choose blue
+  3. Green
+     Choose green
+  4. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+"""
+
 CURSOR_SHELL_PANE = """\
 Run this command?
 Not in allowlist: cd, printf, python3
@@ -112,6 +135,24 @@ def test_ask_user_question_single_select_with_preview_panel():
     assert aq["options"] == ["Red", "Blue"]  # preview panel stripped, meta rows dropped
     assert detect.detect_multiselect_prompt(AQ_PANE) is None  # no Submit tab
     assert detect.detect_ask_user_question("no footer here") is None
+
+
+def test_permission_detector_leaves_ask_user_question_pickers_alone():
+    # The picker is a numbered menu with a ❯ cursor too, so the permission detector used to
+    # claim it first (its meta rows as options, nearby prose as the question) and the
+    # phone showed the wrong question text. Reproduced on Claude Code 2.1.303.
+    for pane in (AQ_PANE, MULTI_PANE, AQ_REAL_PANE):
+        assert detect.detect_permission_prompt(pane) is None
+    aq = detect.detect_ask_user_question(AQ_REAL_PANE)
+    assert aq is not None
+    assert aq["question"] == "Which color do you prefer?"
+    assert aq["options"] == ["Red", "Blue", "Green"]
+    # The footer can scroll out of a short capture; the meta rows still give it away.
+    no_footer = AQ_REAL_PANE.split("\nEnter to select")[0]
+    assert detect.detect_permission_prompt(no_footer) is None
+    # Real permission menus and the plan menu are untouched.
+    assert detect.detect_permission_prompt(PERM_PANE) is not None
+    assert detect.detect_permission_prompt(PLAN_MENU_PANE) is not None
 
 
 def test_multiselect_is_left_to_the_chat_about_this_fallback():
@@ -211,6 +252,17 @@ def test_last_logged_assistant_message(tmp_path):
         json.dumps({"type": "message", "role": "assistant", "content": "last"}),
     ]))
     assert detect.last_logged_assistant_message(log) == "last"
+
+
+def test_codex_update_dialog_owns_the_keyboard():
+    # Seen 2026-09-05 on a brew-installed Codex; a phone message typed into it picked
+    # "Update now" and ran brew upgrade.
+    pane = ("Update available: 0.141.0 -> 0.153.4\n  1. Update now (runs brew upgrade --cask codex)\n"
+            "  2. Skip\n  3. Skip until next version\nPress enter to continue\n")
+    assert detect.detect_codex_update_dialog(pane)
+    assert detect.dialog_is_open(pane, "codex")
+    assert not detect.dialog_is_open(pane, "claude")  # Claude never draws it
+    assert not detect.detect_codex_update_dialog("› Ask Codex to do anything\n")
 
 
 def test_dialog_is_open():

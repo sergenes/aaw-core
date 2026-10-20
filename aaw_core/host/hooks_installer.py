@@ -186,11 +186,37 @@ def update_codex_hooks() -> Path:
     cfg = home() / ".codex" / "config.toml"
     text = cfg.read_text() if cfg.exists() else ""
     if "codex_hooks = true" in text:
-        cfg.write_text(text.replace("codex_hooks = true", "hooks = true"))
+        text = text.replace("codex_hooks = true", "hooks = true")
     elif "hooks = true" not in text:
-        cfg.parent.mkdir(parents=True, exist_ok=True)
-        cfg.write_text(text + "\n[features]\nhooks = true\n")
+        text = text + "\n[features]\nhooks = true\n"
+    text = with_codex_update_check_off(text)
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text(text)
     return path
+
+
+# Codex's startup update check draws a dialog (brew: "1. Update now / 2. Skip / 3. Skip
+# until next version", a numbered menu none of the daemon's detectors know), and a phone
+# message typed into it picks an option; one such accident ran `brew upgrade` (2026-09-05).
+# The check is a top-level config key. A per-session override (`-c` or `--profile`) would
+# keep it out of the user's own Codex runs, but either switches Codex to embedded mode
+# with a warning (0.162), so the key goes into the config with a marker comment and is
+# removed again on uninstall. The user's own setting of the key is left alone.
+CODEX_UPDATE_KEY = "check_for_update_on_startup"
+CODEX_UPDATE_LINE = f"{CODEX_UPDATE_KEY} = false  # Agents At Work Core: no update dialog in bridged sessions"
+
+
+def with_codex_update_check_off(text: str) -> str:
+    """The config text with the update check turned off at top level, if the key is
+    absent. Top-level keys must come before the first table, so ours goes first."""
+    if any(line.split("#")[0].strip().startswith(CODEX_UPDATE_KEY) for line in text.splitlines()):
+        return text
+    return CODEX_UPDATE_LINE + "\n" + text
+
+
+def without_codex_update_line(text: str) -> str:
+    """The config text without the line we wrote (only that exact line)."""
+    return "".join(line for line in text.splitlines(keepends=True) if line.rstrip("\n") != CODEX_UPDATE_LINE)
 
 
 def update_gemini_hooks() -> Path:
@@ -329,6 +355,15 @@ def remove_all() -> list[str]:
     if ours:
         grok.unlink(missing_ok=True)
         touched.append(str(grok))
+    codex_cfg = h / ".codex" / "config.toml"
+    try:
+        text = codex_cfg.read_text() if codex_cfg.exists() else ""
+        stripped = without_codex_update_line(text)
+        if stripped != text:
+            codex_cfg.write_text(stripped)
+            touched.append(str(codex_cfg))
+    except OSError:
+        pass
     return touched
 
 
