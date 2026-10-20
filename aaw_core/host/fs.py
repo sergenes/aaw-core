@@ -15,6 +15,9 @@ from __future__ import annotations
 
 import base64
 import os
+import subprocess
+import sys
+import tempfile
 
 MAX_ENTRIES = 500
 MAX_FETCH_BYTES = 4 * 1024 * 1024  # one response frame; base64 + encryption grow it ~1.8x
@@ -22,6 +25,13 @@ MAX_FETCH_BYTES = 4 * 1024 * 1024  # one response frame; base64 + encryption gro
 # chunk, each under the relay's 1 MiB frame cap, so the file itself can be larger: a
 # full-screen Retina screenshot is a few MB.
 MAX_FETCH_PARTS_BYTES = 12 * 1024 * 1024
+# An image fetched to look at (``max_px`` set) is sent as a JPEG rendition no larger than
+# max_px on its long side when the original is bigger than this: a few-MB screenshot over
+# a home uplink takes ten seconds, its 250 KB rendition one. Save asks without max_px and
+# gets the original. macOS renders with sips; elsewhere the original goes as it is.
+PREVIEW_MIN_BYTES = 300 * 1024
+MAX_PREVIEW_SOURCE_BYTES = 64 * 1024 * 1024  # never read more than this to render a preview
+PREVIEW_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".heic"}  # not .gif: it may animate
 RAW_CHUNK = 384 * 1024  # base64 (x1.33) then encrypted and base64 again stays under one 1 MiB frame
 
 # An attached image the phone uploads (downscaled to a JPEG before it is sent). The cap is
@@ -136,15 +146,45 @@ def list_dir(path: str | None, roots: list[str] | tuple[str, ...] | None = None)
     }
 
 
+def _sips_preview(src: str, max_px: int) -> bytes | None:
+    """A JPEG rendition of an image, at most max_px on the long side, via macOS's sips.
+    None when sips is unavailable or fails (the caller then sends the original)."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=True) as tmp:
+            r = subprocess.run(["sips", "-s", "format", "jpeg", "-s", "formatOptions", "80",
+                                "-Z", str(max_px), src, "--out", tmp.name],
+                               capture_output=True, timeout=30)
+            if r.returncode != 0:
+                return None
+            with open(tmp.name, "rb") as f:
+                data = f.read()
+            return data or None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def preview_image(path: str, ext: str, size: int, max_px: int) -> tuple[bytes, str] | None:
+    """(bytes, mime) of the rendition to send instead of the original, or None to send
+    the original: not an image we downscale, small enough already, or no renderer."""
+    if max_px <= 0 or ext not in PREVIEW_EXTS or size <= PREVIEW_MIN_BYTES or size > MAX_PREVIEW_SOURCE_BYTES:
+        return None
+    data = _sips_preview(path, max_px)
+    return (data, "image/jpeg") if data else None
+
+
 def fetch_file(path: str, roots: list[str] | tuple[str, ...] | None = None,
-               max_bytes: int | None = None) -> dict:
+               max_bytes: int | None = None, max_px: int = 0) -> dict:
     """Read a file for the phone::
 
         {mime, size, chunks: [base64-str, ...], error}
 
     ``chunks`` are base64 of raw slices of at most RAW_CHUNK bytes (plaintext here; the
     supervisor encrypts each). ``error`` is "" on success or one of the ERR_* codes.
-    ``max_bytes`` defaults to MAX_FETCH_BYTES (the single-frame cap).
+    ``max_bytes`` defaults to MAX_FETCH_BYTES (the single-frame cap). ``max_px`` asks for
+    a rendition of a large image no bigger than that on its long side (see preview_image);
+    ``size`` and ``mime`` then describe the rendition.
     """
     cap = MAX_FETCH_BYTES if max_bytes is None else max_bytes
     roots = [canon(r) for r in (roots or default_roots())]
@@ -163,16 +203,24 @@ def fetch_file(path: str, roots: list[str] | tuple[str, ...] | None = None,
         size = os.path.getsize(target)
     except OSError:
         return _file_err(ERR_DENIED)
+    mime = ALLOWED[ext]
+    preview = preview_image(target, ext, size, max_px)
+    if preview is not None:
+        data, mime = preview
+        size = len(data)
+    else:
+        if size > cap:
+            return _file_err(ERR_TOO_LARGE)
+        try:
+            with open(target, "rb") as f:
+                data = f.read()
+        except OSError:
+            return _file_err(ERR_DENIED)
     if size > cap:
         return _file_err(ERR_TOO_LARGE)
-    try:
-        with open(target, "rb") as f:
-            data = f.read()
-    except OSError:
-        return _file_err(ERR_DENIED)
 
     chunks = [base64.b64encode(data[i:i + RAW_CHUNK]).decode() for i in range(0, len(data), RAW_CHUNK)] or [""]
-    return {"mime": ALLOWED[ext], "size": size, "chunks": chunks, "error": ""}
+    return {"mime": mime, "size": size, "chunks": chunks, "error": ""}
 
 
 def save_attachment(chunks_b64: list[str], suffix: str, dest_dir: str) -> dict:

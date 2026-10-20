@@ -370,8 +370,12 @@ class Supervisor:
         # response_parts) may have a larger file; an older phone gets one frame and the
         # single-frame cap.
         in_parts = bool(payload.get("parts"))
+        try:
+            max_px = int(payload.get("max_px") or 0)  # a rendition to look at, not the original
+        except (TypeError, ValueError):
+            max_px = 0
         res = fs.fetch_file(path, self.settings.browse_roots,
-                            max_bytes=fs.MAX_FETCH_PARTS_BYTES if in_parts else None)
+                            max_bytes=fs.MAX_FETCH_PARTS_BYTES if in_parts else None, max_px=max_px)
         if res["error"]:
             return {"error": res["error"], "total_chunks": 0}
         return {"mime": res["mime"], "size": res["size"], "total_chunks": len(res["chunks"]),

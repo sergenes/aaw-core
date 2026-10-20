@@ -87,6 +87,48 @@ def test_fetch_file_images_and_the_parts_cap(tmp_path, monkeypatch):
     assert fs.fetch_file(str(png), [str(root)], max_bytes=10)["error"] == fs.ERR_TOO_LARGE
 
 
+def test_fetch_file_sends_a_rendition_of_a_large_image_when_asked(tmp_path, monkeypatch):
+    root = _tree(tmp_path)
+    big = root / "shot.png"
+    big.write_bytes(b"P" * (fs.PREVIEW_MIN_BYTES + 1))
+    small = root / "icon.png"
+    small.write_bytes(b"p" * 100)
+    gif = root / "anim.gif"
+    gif.write_bytes(b"G" * (fs.PREVIEW_MIN_BYTES + 1))
+    calls = []
+    monkeypatch.setattr(fs, "_sips_preview", lambda src, max_px: calls.append((src, max_px)) or b"JPEGDATA")
+    res = fs.fetch_file(str(big), [str(root)], max_px=2048)
+    assert (res["mime"], res["size"]) == ("image/jpeg", 8) and base64.b64decode(res["chunks"][0]) == b"JPEGDATA"
+    assert calls == [(str(big), 2048)]
+    # the original when: no max_px (Save), a small image, a gif, or the renderer fails
+    assert fs.fetch_file(str(big), [str(root)])["mime"] == "image/png"
+    assert fs.fetch_file(str(small), [str(root)], max_px=2048)["size"] == 100
+    assert fs.fetch_file(str(gif), [str(root)], max_px=2048)["mime"] == "image/gif"
+    monkeypatch.setattr(fs, "_sips_preview", lambda src, max_px: None)
+    assert fs.fetch_file(str(big), [str(root)], max_px=2048)["mime"] == "image/png"
+    # a huge original can still be looked at through its rendition, but not saved whole
+    monkeypatch.setattr(fs, "_sips_preview", lambda src, max_px: b"J")
+    monkeypatch.setattr(fs, "MAX_FETCH_BYTES", fs.PREVIEW_MIN_BYTES)
+    assert fs.fetch_file(str(big), [str(root)], max_px=1024)["size"] == 1
+    assert fs.fetch_file(str(big), [str(root)])["error"] == fs.ERR_TOO_LARGE
+    # the real renderer, where it exists
+    if fs.sys.platform == "darwin":
+        monkeypatch.undo()
+        import struct
+        import zlib
+        def png(w, h):
+            raw = b"".join(b"\x00" + b"\xff\x00\x00" * w for _ in range(h))
+            def chunk(t, d): return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d))
+            return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+                    + chunk(b"IDAT", zlib.compress(raw, 0)) + chunk(b"IEND", b""))
+        real = root / "real.png"
+        real.write_bytes(png(400, 300))
+        assert real.stat().st_size > fs.PREVIEW_MIN_BYTES
+        res = fs.fetch_file(str(real), [str(root)], max_px=100)
+        assert res["mime"] == "image/jpeg" and 0 < res["size"] < real.stat().st_size
+        assert base64.b64decode(res["chunks"][0])[:2] == b"\xff\xd8"
+
+
 def test_save_attachment_writes_the_image_and_returns_a_path(tmp_path):
     dest = str(tmp_path / "attach")
     img = b"\xff\xd8\xff" + b"jpeg-bytes" * 100  # stand-in bytes; the daemon never inspects them
