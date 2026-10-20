@@ -18,7 +18,11 @@ import os
 
 MAX_ENTRIES = 500
 MAX_FETCH_BYTES = 4 * 1024 * 1024  # one response frame; base64 + encryption grow it ~1.8x
-RAW_CHUNK = 512 * 1024
+# A phone that asks for the file in parts (``parts: true``) gets one response frame per
+# chunk, each under the relay's 1 MiB frame cap, so the file itself can be larger: a
+# full-screen Retina screenshot is a few MB.
+MAX_FETCH_PARTS_BYTES = 12 * 1024 * 1024
+RAW_CHUNK = 384 * 1024  # base64 (x1.33) then encrypted and base64 again stays under one 1 MiB frame
 
 # An attached image the phone uploads (downscaled to a JPEG before it is sent). The cap is
 # generous for a photo while bounding what one request can write; the phone sends far less.
@@ -28,12 +32,18 @@ ATTACH_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic"}
 # so nothing needs to linger, and the folder never grows without bound.
 ATTACH_TTL_S = 24 * 60 * 60
 
-# extension -> mime; text only for now (images would need only an entry here: the
-# transfer is already binary-safe).
+# extension -> mime. The transfer is binary-safe (base64 slices), so an image needs
+# only its entry here; the phone renders by mime.
 ALLOWED = {
     ".md": "text/markdown",
     ".txt": "text/plain",
     ".csv": "text/csv",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".heic": "image/heic",
 }
 
 ERR_NOT_FOUND = "not_found"
@@ -126,14 +136,17 @@ def list_dir(path: str | None, roots: list[str] | tuple[str, ...] | None = None)
     }
 
 
-def fetch_file(path: str, roots: list[str] | tuple[str, ...] | None = None) -> dict:
+def fetch_file(path: str, roots: list[str] | tuple[str, ...] | None = None,
+               max_bytes: int | None = None) -> dict:
     """Read a file for the phone::
 
         {mime, size, chunks: [base64-str, ...], error}
 
     ``chunks`` are base64 of raw slices of at most RAW_CHUNK bytes (plaintext here; the
     supervisor encrypts each). ``error`` is "" on success or one of the ERR_* codes.
+    ``max_bytes`` defaults to MAX_FETCH_BYTES (the single-frame cap).
     """
+    cap = MAX_FETCH_BYTES if max_bytes is None else max_bytes
     roots = [canon(r) for r in (roots or default_roots())]
     target = canon(path)
 
@@ -150,7 +163,7 @@ def fetch_file(path: str, roots: list[str] | tuple[str, ...] | None = None) -> d
         size = os.path.getsize(target)
     except OSError:
         return _file_err(ERR_DENIED)
-    if size > MAX_FETCH_BYTES:
+    if size > cap:
         return _file_err(ERR_TOO_LARGE)
     try:
         with open(target, "rb") as f:

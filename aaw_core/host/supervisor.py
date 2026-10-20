@@ -366,11 +366,29 @@ class Supervisor:
         path = self.decrypt(payload.get("path_enc") or "")
         if not path:
             return {"error": fs.ERR_DENIED, "total_chunks": 0}
-        res = fs.fetch_file(path, self.settings.browse_roots)
+        # A phone that can take the file in parts (one response frame per chunk, see
+        # response_parts) may have a larger file; an older phone gets one frame and the
+        # single-frame cap.
+        in_parts = bool(payload.get("parts"))
+        res = fs.fetch_file(path, self.settings.browse_roots,
+                            max_bytes=fs.MAX_FETCH_PARTS_BYTES if in_parts else None)
         if res["error"]:
             return {"error": res["error"], "total_chunks": 0}
         return {"mime": res["mime"], "size": res["size"], "total_chunks": len(res["chunks"]),
                 "chunks": [self.encrypt(c) for c in res["chunks"]], "error": ""}
+
+    @staticmethod
+    def response_parts(reply: dict) -> list[dict]:
+        """A chunked reply as the response frames to send: one per chunk, each carrying
+        the reply's other fields plus ``part`` (0-based). The relay caps a frame at 1 MiB,
+        so a multi-chunk file cannot travel as one frame; the phone that asked with
+        ``parts: true`` joins them by ``part`` up to ``total_chunks``. A reply with at most
+        one chunk (or an error) goes as it is."""
+        chunks = reply.get("chunks") or []
+        if len(chunks) <= 1:
+            return [reply]
+        head = {k: v for k, v in reply.items() if k != "chunks"}
+        return [{**head, "part": i, "chunks": [c]} for i, c in enumerate(chunks)]
 
     def req_fs_attach(self, payload: dict) -> dict:
         """Save an image the phone attached to a prompt and return its local path. This is
@@ -424,8 +442,10 @@ class Supervisor:
         while self.running:
             try:
                 frame = self.transport.requests.get(timeout=1)
-                reply = self.handle_request(frame.get("kind") or "", frame.get("payload") or {})
-                self.transport.respond(frame, reply)
+                payload = frame.get("payload") or {}
+                reply = self.handle_request(frame.get("kind") or "", payload)
+                for part in (self.response_parts(reply) if payload.get("parts") else [reply]):
+                    self.transport.respond(frame, part)
             except queue.Empty:
                 pass
             now = time.time()

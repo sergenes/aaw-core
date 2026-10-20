@@ -112,7 +112,7 @@ The phone's `request` frames the supervisor answers (`response {req, kind, paylo
 | `stop_session` | `project_id` | `result`: `stopped` \| `not_found` |
 | `new_session` | `path_enc`, `agent`, `model?`, `intent?` (`parallel`) | `result`: `started` \| `conflict` (+ `conflict_agents`, `conflict_session_id`) \| `outside_roots` \| `not_found` \| `not_a_dir` \| `agent_unavailable` \| `error`; `session_id` |
 | `fs_browse` | `path_enc?` (absent = the first root) | `resolved_path_enc`, `parent_enc`, `at_root`, `entries[{name_enc, kind, is_repo, size?}]`, `truncated`, `error` |
-| `fs_fetch` | `path_enc` | `mime`, `size`, `total_chunks`, `chunks[<encrypted base64>]`, `error` |
+| `fs_fetch` | `path_enc`, `parts?` (true: one response frame per chunk) | `mime`, `size`, `total_chunks`, `chunks[<encrypted base64>]`, `error`; with `parts`, each frame carries one chunk and its 0-based `part`, and the phone joins them up to `total_chunks` (the relay caps a frame at 1 MiB; without `parts` the file cap is 4 MiB, with it 12 MiB). Text (`.md`, `.txt`, `.csv`) and images (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.heic`) |
 
 When no computer socket is live the relay itself answers `{"error": "offline"}`.
 

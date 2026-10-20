@@ -67,6 +67,26 @@ def test_fetch_file_allowlist_cap_and_chunks(tmp_path, monkeypatch):
     assert len(res["chunks"]) == 3
 
 
+def test_fetch_file_images_and_the_parts_cap(tmp_path, monkeypatch):
+    root = _tree(tmp_path)
+    png = root / "proj" / "shot.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 8)
+    res = fs.fetch_file(str(png), [str(root)])
+    assert res["error"] == "" and res["mime"] == "image/png"
+    assert b"".join(base64.b64decode(c) for c in res["chunks"]) == png.read_bytes()
+    assert fs.fetch_file(str(root / "proj" / "data.bin"), [str(root)])["error"] == fs.ERR_UNSUPPORTED
+    for ext, mime in ((".jpg", "image/jpeg"), (".JPEG", "image/jpeg"), (".heic", "image/heic"), (".webp", "image/webp")):
+        f = root / f"x{ext}"
+        f.write_bytes(b"xx")
+        assert fs.fetch_file(str(f), [str(root)])["mime"] == mime
+    # the single-frame cap applies by default; a phone taking the file in parts gets the larger one
+    monkeypatch.setattr(fs, "MAX_FETCH_BYTES", 100)
+    monkeypatch.setattr(fs, "MAX_FETCH_PARTS_BYTES", 10_000)
+    assert fs.fetch_file(str(png), [str(root)])["error"] == fs.ERR_TOO_LARGE
+    assert fs.fetch_file(str(png), [str(root)], max_bytes=fs.MAX_FETCH_PARTS_BYTES)["error"] == ""
+    assert fs.fetch_file(str(png), [str(root)], max_bytes=10)["error"] == fs.ERR_TOO_LARGE
+
+
 def test_save_attachment_writes_the_image_and_returns_a_path(tmp_path):
     dest = str(tmp_path / "attach")
     img = b"\xff\xd8\xff" + b"jpeg-bytes" * 100  # stand-in bytes; the daemon never inspects them
