@@ -68,7 +68,7 @@ import sqlite3
 import sys
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -143,6 +143,9 @@ PHONE_STATE_FIELDS = {"auto_approve", "pending_message"}
 # bytes), FCM quota (pushes), and sockets (per-address caps). Generous for real use.
 WS_MAX_SIZE = 1024 * 1024            # largest incoming frame; passed to uvicorn by __main__
 HELLO_TIMEOUT_S = 10.0               # a socket must say hello within this or is closed
+SEND_TIMEOUT_S = 5.0                 # a peer that cannot take a frame in this long is dropped
+WS_PING_INTERVAL_S = 20.0            # server pings; a socket that answers none in WS_PING_TIMEOUT_S
+WS_PING_TIMEOUT_S = 20.0             # is closed by uvicorn, so a dead one is reaped within a minute
 HISTORY_MAX_EVENTS = 1000            # hard cap on one history response, whatever the client asks
 HISTORY_MAX_BYTES = 8 * 1024 * 1024  # and on its payload bytes (newest events win)
 FRAMES_PER_MINUTE = 1200             # per-connection budget for incoming frames
@@ -328,14 +331,32 @@ class Relay:
 
     async def _forward(self, computer_id: str, frame: dict, *, exclude: str | None = None,
                        role: str | None = None) -> int:
-        n = 0
-        for conn in self._peers(computer_id, exclude=exclude, role=role):
-            try:
-                await conn.send(frame)
-                n += 1
-            except (WebSocketDisconnect, RuntimeError, OSError):
-                pass
-        return n
+        """Send a frame to every live peer of a computer at once; the count that took it.
+
+        Peers are sent to concurrently and each send has a deadline. A computer socket
+        that died without a close (the Mac app killed its supervisor; the kernel buffer
+        filled and nothing drained it) used to block the loop, and every phone request to
+        that computer waited for minutes until the socket timed out on its own (seen
+        2026-10-20). Now the dead peer costs one SEND_TIMEOUT_S, once, and is dropped."""
+        peers = self._peers(computer_id, exclude=exclude, role=role)
+        if not peers:
+            return 0
+        results = await asyncio.gather(*(self._send_to(conn, frame) for conn in peers))
+        return sum(results)
+
+    async def _send_to(self, conn: Conn, frame: dict) -> int:
+        try:
+            await asyncio.wait_for(conn.send(frame), SEND_TIMEOUT_S)
+            return 1
+        except TimeoutError:
+            log.warning("dropping a %s socket for %s: no progress in %.0fs", conn.role, conn.computer_id,
+                        SEND_TIMEOUT_S)
+            self.live.get(conn.computer_id, {}).pop(conn.id, None)
+            with suppress(Exception):  # the socket is dead; closing it is best effort
+                await asyncio.wait_for(conn.ws.close(), 1.0)
+            return 0
+        except (WebSocketDisconnect, RuntimeError, OSError):
+            return 0
 
     async def _cleanup(self) -> None:
         now = _now_s()
