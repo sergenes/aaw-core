@@ -274,9 +274,15 @@ class RelayTransport:
         self._send({"type": "computer", "fields": fields})
 
     def set_project_status(self, status: str, last_event_summary: str = "", pending_question_id=None) -> None:
-        fields = {"status": status, "last_event_ts": int(time.time()), "project_id": self.project_id}
+        """A status change alone does not count as activity: last_event_ts moves only with
+        a summary (a tool call, a question, a notice), and write_event moves it for messages
+        and questions. Before 2026-10-20 every status write stamped it, so a daemon restart
+        or an idle check made every untouched session look freshly used and the "last
+        touched to the top" order on the phone meant nothing after a restart."""
+        fields = {"status": status, "project_id": self.project_id}
         if last_event_summary:
             fields["last_event_summary"] = self.encrypt_field(last_event_summary)
+            fields["last_event_ts"] = int(time.time())
         if pending_question_id is not None:
             fields["pending_question_id"] = pending_question_id
         self.update_project(**fields)
@@ -340,6 +346,9 @@ class RelayTransport:
         else:
             self._log.append(entry)  # local log first: the feed must work even if the relay is down
         self._send({"type": "event", "project_id": self.project_id, "event": stored})
+        if event_type in ("message", "question"):
+            # Real activity: a prompt, a reply, a question. The card's "last touched" time.
+            self.update_project(last_event_ts=int(time.time()))
         if event_type == "notification" and payload.get("level") in PUSHABLE_NOTIFICATION_LEVELS:
             # The same alerts the phone is pushed, for a desktop GUI that polls the mirror:
             # the summary alone is not enough, "waiting for your input" overwrites it a

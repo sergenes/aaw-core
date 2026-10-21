@@ -45,7 +45,7 @@ def test_restart_that_starts_fresh_clears_the_feed_and_the_summary(monkeypatch, 
     # folders that ran Claude before; those agents never write a summary of their own).
     calls = _restart(monkeypatch, tmp_path, resumed=False)
     assert calls == ["clear_events", "init_local_log(reconnect=False)",
-                     "status=running", "update=['background_agents', 'last_event_summary']"]
+                     "status=running", "update=['background_agents', 'last_event_summary', 'last_event_ts']"]
 
 
 # ── stale commands: the age cap on deliver-on-reconnect ─────────────────────
