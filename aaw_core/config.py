@@ -40,8 +40,12 @@ def default_computer_name() -> str:
                 return out
         except (OSError, subprocess.SubprocessError):
             pass
-    name = os.uname().nodename
-    return name.removesuffix(".local")
+    return hostname_fallback()
+
+
+def hostname_fallback() -> str:
+    """The network hostname without a trailing ".local": the name of last resort."""
+    return os.uname().nodename.removesuffix(".local")
 
 
 def _config_file(state_dir: Path) -> dict:

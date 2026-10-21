@@ -63,9 +63,12 @@ def build_transport(settings: Settings, project_id: str) -> RelayTransport | Non
     if ident is None:
         log("this host is not set up yet; run `aaw link` first", err=True)
         return None
+    # The supervisor owns the computer's name in its document; a daemon's heartbeat carries
+    # only last_seen and status.
     return RelayTransport(relay_url=settings.relay_url, token=ident.token, computer_id=ident.computer_id,
                           project_id=project_id, sessions_dir=settings.sessions_dir,
-                          computer_name=ident.computer_name, enc_key=read_key(settings)).start()
+                          computer_name=ident.computer_name, enc_key=read_key(settings),
+                          announces_name=False).start()
 
 
 def project_doc(transport: RelayTransport) -> dict:

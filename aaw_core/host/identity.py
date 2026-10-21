@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import uuid
 from dataclasses import asdict, dataclass
 
-from aaw_core.config import Settings
+from aaw_core.config import Settings, hostname_fallback
 
 
 @dataclass(frozen=True)
@@ -32,8 +33,14 @@ def load_identity(settings: Settings) -> HostIdentity | None:
     if not d.get("computer_id") or not d.get("token"):
         return None
     # The name is resolved on every load, not pinned at setup: renaming the computer (or
-    # setting computer_name) reaches the phones with the next update.
-    return HostIdentity(d["computer_id"], d["token"], settings.computer_name)
+    # setting computer_name) reaches the phones with the next update. On macOS the lookup
+    # can fail under load and fall back to the hostname ("Serges-MacBook-Pro"); the name
+    # saved at setup is better than that, so it wins over the hostname fallback only.
+    name = settings.computer_name
+    saved = d.get("computer_name") or ""
+    if sys.platform == "darwin" and saved and name == hostname_fallback():
+        name = saved
+    return HostIdentity(d["computer_id"], d["token"], name)
 
 
 def load_or_create_identity(settings: Settings) -> HostIdentity:
