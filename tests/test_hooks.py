@@ -302,6 +302,31 @@ def test_claude_transcript_latest_entry_only(tmp_path):
     assert "interrupted" in on_stop_claude.friendly_api_error_message("connection", "ECONNRESET")
 
 
+def test_model_from_transcript_per_agent(tmp_path):
+    """The phone shows the model next to the agent. Claude's assistant entries name it;
+    a Codex rollout names it in turn_context (and thread_settings_applied at start). The
+    newest entry wins, so a /model switch shows after the next turn."""
+    t = tmp_path / "claude.jsonl"
+    t.write_text("\n".join([
+        json.dumps({"type": "assistant", "message": {"role": "assistant", "model": "claude-opus-5-5", "content": []}}),
+        json.dumps({"type": "assistant", "message": {"role": "assistant", "model": "claude-fable-5-1", "content": []}}),
+        json.dumps({"type": "assistant", "message": {"role": "assistant", "model": "<synthetic>", "content": []}}),
+        json.dumps({"type": "user", "message": {"role": "user", "content": "hi"}}),
+        "not json",
+    ]))
+    assert on_stop_claude.model_from_transcript(str(t)) == "claude-fable-5-1"
+    c = tmp_path / "rollout.jsonl"
+    c.write_text("\n".join([
+        json.dumps({"type": "event_msg", "payload": {"type": "thread_settings_applied",
+                                                     "thread_settings": {"model": "gpt-5.1"}}}),
+        json.dumps({"type": "turn_context", "payload": {"model": "gpt-6-sol", "cwd": "/x"}}),
+        json.dumps({"type": "response_item", "payload": {"type": "message", "role": "assistant"}}),
+    ]))
+    assert on_stop_claude.model_from_transcript(str(c), "codex") == "gpt-6-sol"
+    assert on_stop_claude.model_from_transcript(str(tmp_path / "missing")) == ""
+    assert on_stop_claude.model_from_transcript("") == ""
+
+
 def test_stray_line_dump_guard():
     assert on_stop_claude.looks_like_stray_line_dump(["   91    def f():", "   92        pass"])
     assert not on_stop_claude.looks_like_stray_line_dump(["   1    first item", "   2    second"])  # a real list
@@ -358,6 +383,47 @@ def test_grok_pane_extractor():
     assert on_stop_grok.is_chrome("") and on_stop_grok.is_chrome("~/proj") and on_stop_grok.is_chrome("Shift+Tab to cycle")
     assert not on_stop_grok.is_chrome("A real sentence.")
     assert on_stop_grok.grok_clean("▌hello▐ ") == "hello"
+
+
+class _ModelTransport:
+    def __init__(self):
+        self.updates: list[dict] = []
+        self.cleared = False
+
+    def update_project(self, **fields):
+        self.updates.append(fields)
+
+    def clear_events(self):
+        self.cleared = True
+
+    def stop(self):
+        pass
+
+
+def test_session_start_restamps_or_clears_the_model_for_claude_and_codex(settings, monkeypatch, tmp_path):
+    """A folder that ran scoot kept scoot's model on the doc, and the Claude session that
+    replaced it showed "gpt-6-astra" for days. A resumed session names its model in the
+    transcript; a fresh one has none and the first turn's Stop hook fills it in."""
+    t = tmp_path / "resumed.jsonl"
+    t.write_text(json.dumps({"type": "assistant", "message": {"role": "assistant", "model": "claude-opus-5-5"}}))
+    calls = []
+
+    def run(agent, payload):
+        transport = _ModelTransport()
+        monkeypatch.setattr(on_session_start, "preamble", lambda: (settings, "p", agent))
+        monkeypatch.setattr(on_session_start, "read_payload", lambda: payload)
+        monkeypatch.setattr(on_session_start, "open_transport", lambda s, p: transport)
+        assert on_session_start.main() == 0
+        calls.append(transport)
+        return transport
+
+    assert run("claude", {"source": "resume", "transcript_path": str(t)}).updates == [{"model": "claude-opus-5-5"}]
+    assert run("claude", {"source": "startup", "transcript_path": str(tmp_path / "fresh.jsonl")}).updates == [{"model": ""}]
+    assert run("codex", {"source": "startup"}).updates == [{"model": ""}]
+    assert run("claude", {"source": "compact", "transcript_path": str(t)}).updates == []  # mid-session: untouched
+    cleared = run("claude", {"source": "clear", "transcript_path": str(t)})
+    assert cleared.cleared and cleared.updates == []
+    assert run("gemini", {"source": "startup"}).updates == []  # no transcript model for gemini yet
 
 
 def test_scoot_model_prefers_env_then_newest_session_file(monkeypatch, tmp_path):

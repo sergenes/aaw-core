@@ -198,7 +198,12 @@ def create_session(session: str, project_dir, agent: str, project_id: str,
                 f"printf 'Press Enter to close '; read -r _aaw_done")
     env = {"AAW_PROJECT": project_id, "AAW_AGENT": agent, "PATH": os.environ.get("PATH", "")}
     env.update(extra_env or {})
-    args = ["new-session", "-d", "-s", session, "-c", str(project_dir)]
+    # A detached session is 80x24 unless told otherwise, and nobody attaches a terminal
+    # on a headless Linux box. Claude Code folds its pickers to the rows it has (two
+    # models plus "… +9 models" in 24 rows), so the phone saw two options. A terminal
+    # that attaches later resizes the window to itself (window-size latest), so an
+    # explicit size only matters while nobody is looking.
+    args = ["new-session", "-d", "-s", session, "-c", str(project_dir), "-x", "200", "-y", "50"]
     for k, v in env.items():
         args += ["-e", f"{k}={v}"]
     try:
