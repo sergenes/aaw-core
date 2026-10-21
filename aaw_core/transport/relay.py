@@ -58,11 +58,17 @@ def new_token() -> str:
 
 class RelayTransport:
     def __init__(self, *, relay_url: str, token: str, computer_id: str, project_id: str,
-                 sessions_dir: Path, computer_name: str = "", enc_key: str | None = None):
+                 sessions_dir: Path, computer_name: str = "", enc_key: str | None = None,
+                 announces_name: bool = True):
         self.relay_url = relay_url
         self.token = token
         self.computer_id = computer_id
         self.computer_name = computer_name
+        # Only one process may write the computer's name into its document: the supervisor.
+        # Session daemons heartbeat too, and ten of them each resolving the name on their own
+        # (one under load fell back to the hostname) had the phones flip between
+        # "Serge's m1 MacBook Pro" and "Serges-m1-MacBook-Pro" with every heartbeat.
+        self.announces_name = announces_name
         self.project_id = project_id
         self._enc_key = enc_key
         self._log = LocalLog(sessions_dir, project_id)
@@ -267,7 +273,9 @@ class RelayTransport:
     # ── computer + project docs ───────────────────────────────────────────────
 
     def update_computer(self, status: str | None = None, **extra) -> None:
-        fields = {"last_seen": int(time.time()), "computer_id": self.computer_id, "name": self.computer_name}
+        fields = {"last_seen": int(time.time()), "computer_id": self.computer_id}
+        if self.announces_name and self.computer_name:
+            fields["name"] = self.computer_name
         if status:
             fields["status"] = status
         fields.update(extra)

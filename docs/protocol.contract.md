@@ -73,7 +73,7 @@ Merged field by field (`state` frames); the phone renders the session card from 
 
 | field | meaning |
 | --- | --- |
-| `computer_id`, `name` | identity, as in the QR |
+| `computer_id`, `name` | identity, as in the QR. `name` is written by the supervisor's heartbeat only; a session daemon's heartbeat carries `last_seen` and `status`, never `name` (since 0.1.9, so ten daemons resolving the name on their own cannot make it flip) |
 | `status` | `online` (supervisor) \| `running` (a daemon) \| `offline` |
 | `last_seen` | epoch s |
 | `platform` | `linux` \| `macos` |
