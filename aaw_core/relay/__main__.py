@@ -17,7 +17,7 @@ import os
 
 import uvicorn
 
-from aaw_core.relay.server import WS_MAX_SIZE, PushSender, create_app
+from aaw_core.relay.server import WS_MAX_SIZE, WS_PING_INTERVAL_S, WS_PING_TIMEOUT_S, PushSender, create_app
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -36,7 +36,10 @@ def main(argv: list[str] | None = None) -> int:
         from aaw_core.relay.push_fcm import FcmPushSender
         push = FcmPushSender(a.fcm_service_account)
         print(f"[relay] pushes enabled through FCM project {push.project_id}", flush=True)
-    uvicorn.run(create_app(a.db, push), host=a.host, port=a.port, log_level="info", ws_max_size=WS_MAX_SIZE)
+    # Server-side pings reap a socket that died without a close within about a minute;
+    # the relay's own send deadline (SEND_TIMEOUT_S) covers the window before that.
+    uvicorn.run(create_app(a.db, push), host=a.host, port=a.port, log_level="info", ws_max_size=WS_MAX_SIZE,
+                ws_ping_interval=WS_PING_INTERVAL_S, ws_ping_timeout=WS_PING_TIMEOUT_S)
     return 0
 
 
