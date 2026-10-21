@@ -81,6 +81,32 @@ def test_fs_fetch_round_trip(sup):
     assert sup.handle_request("fs_fetch", {})["error"] == fs.ERR_DENIED
 
 
+def test_fs_fetch_in_parts_splits_a_chunked_reply_into_one_frame_per_chunk(sup, monkeypatch):
+    from aaw_core.host import supervisor as sv
+
+    monkeypatch.setattr(fs, "RAW_CHUNK", 4)
+    (sup.home / "big.png").write_bytes(b"0123456789ab")  # 3 chunks of 4
+    payload = {"path_enc": encrypt(str(sup.home / "big.png"), KEY), "parts": True}
+    reply = sup.handle_request("fs_fetch", payload)
+    assert reply["total_chunks"] == 3 and reply["mime"] == "image/png"
+    parts = sv.Supervisor.response_parts(reply)
+    assert [p["part"] for p in parts] == [0, 1, 2]
+    assert all(p["total_chunks"] == 3 and p["size"] == 12 and p["error"] == "" and len(p["chunks"]) == 1 for p in parts)
+    joined = b"".join(base64.b64decode(decrypt(p["chunks"][0], KEY)) for p in parts)
+    assert joined == b"0123456789ab"
+    # one chunk, or an error: a single frame, unchanged
+    assert sv.Supervisor.response_parts({"error": "too_large", "total_chunks": 0}) == [{"error": "too_large", "total_chunks": 0}]
+    small = sup.handle_request("fs_fetch", {"path_enc": encrypt(str(sup.home / "big.png"), KEY)})
+    monkeypatch.setattr(fs, "RAW_CHUNK", 1 << 20)
+    one = sup.handle_request("fs_fetch", {"path_enc": encrypt(str(sup.home / "big.png"), KEY), "parts": True})
+    assert sv.Supervisor.response_parts(one) == [one]
+    # without parts the single-frame cap holds; with parts the larger one
+    monkeypatch.setattr(fs, "MAX_FETCH_BYTES", 4)
+    assert sup.handle_request("fs_fetch", {"path_enc": encrypt(str(sup.home / "big.png"), KEY)})["error"] == fs.ERR_TOO_LARGE
+    assert sup.handle_request("fs_fetch", payload)["error"] == ""
+    assert small["total_chunks"] == 3
+
+
 def test_fs_attach_saves_the_image_and_returns_its_path(sup):
     img = b"\xff\xd8\xff" + b"photo" * 50
     chunks = [encrypt(base64.b64encode(img[i:i + 16]).decode(), KEY) for i in range(0, len(img), 16)]
