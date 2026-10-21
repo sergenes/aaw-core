@@ -24,6 +24,8 @@ class FakeTransport:
         self.project_writes: list[tuple[str, dict]] = []
         self.commands: dict[str, list] = {}
         self.notifications: list[tuple[str, str]] = []
+        self.requests = None  # a queue.Queue when a test feeds phone requests
+        self.responses: list[tuple[str, dict]] = []
 
     def update_computer(self, **fields):
         self.computer_updates.append(fields)
@@ -43,6 +45,9 @@ class FakeTransport:
     def mirror_projects(self, docs):
         self.mirrored = docs
 
+
+    def respond(self, request, payload):  # phone requests, fed by a test through `requests`
+        self.responses.append((request.get("req"), payload))
 
 @pytest.fixture
 def sup(tmp_path, monkeypatch):
@@ -79,6 +84,51 @@ def test_fs_fetch_round_trip(sup):
     assert reply["error"] == "" and reply["mime"] == "text/markdown" and reply["total_chunks"] == 1
     assert base64.b64decode(decrypt(reply["chunks"][0], KEY)) == b"hello"
     assert sup.handle_request("fs_fetch", {})["error"] == fs.ERR_DENIED
+
+
+def test_serve_requests_drains_the_queue_and_splits_parts(sup, monkeypatch):
+    import queue as q
+    import time
+
+    monkeypatch.setattr(fs, "RAW_CHUNK", 4)
+    (sup.home / "a.md").write_text("hello world!")  # 3 chunks
+    sup.transport.requests = q.Queue()
+    sup.transport.responses = []
+    sup.transport.requests.put({"req": "r1", "kind": "fs_browse", "payload": {}})
+    sup.transport.requests.put({"req": "r2", "kind": "fs_fetch",
+                                "payload": {"path_enc": encrypt(str(sup.home / "a.md"), KEY), "parts": True}})
+    sup.transport.requests.put({"req": "r3", "kind": "nope", "payload": {}})
+    sup.serve_requests()  # no wait: answers all three and returns
+    answered = [r for r, _ in sup.transport.responses]
+    assert answered == ["r1", "r2", "r2", "r2", "r3"]
+    assert [p.get("part") for r, p in sup.transport.responses if r == "r2"] == [0, 1, 2]
+    assert sup.transport.responses[-1][1] == {"error": "unknown_request"}
+    # an empty queue returns at once without waiting, and waits at most `wait` otherwise
+    t0 = time.time()
+    sup.serve_requests()
+    sup.serve_requests(wait=0.2)
+    assert 0.15 < time.time() - t0 < 1.0
+
+
+def test_file_requests_do_not_wait_for_the_session_lock_but_session_requests_do(sup, monkeypatch):
+    import queue as q
+    import threading
+    import time
+
+    sup.transport.requests = q.Queue()
+    sup.transport.responses = []
+    monkeypatch.setattr(sup, "req_start_session", lambda payload: {"result": "started"})
+    with sup.session_lock:  # a watchdog duty is running
+        sup.transport.requests.put({"req": "browse", "kind": "fs_browse", "payload": {}})
+        sup.serve_requests()
+        assert [r for r, _ in sup.transport.responses] == ["browse"]
+        sup.transport.requests.put({"req": "start", "kind": "start_session", "payload": {"project_id": "p"}})
+        worker = threading.Thread(target=sup.serve_requests, daemon=True)
+        worker.start()
+        time.sleep(0.3)
+        assert [r for r, _ in sup.transport.responses] == ["browse"]  # still waiting for the duty
+    worker.join(timeout=2)
+    assert [r for r, _ in sup.transport.responses] == ["browse", "start"]
 
 
 def test_fs_fetch_in_parts_splits_a_chunked_reply_into_one_frame_per_chunk(sup, monkeypatch):
