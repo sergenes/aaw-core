@@ -83,8 +83,9 @@ def decrypt_field(value: str, key_b64: str | None) -> str:
 def encrypt_payload(event_type: str, payload: dict, key_b64: str | None) -> dict:
     """Return a copy of ``payload`` with the sensitive fields for ``event_type`` encrypted.
 
-    Question options additionally get an encrypted copy in ``options_enc`` while the
-    plaintext list stays for older app versions.
+    Question options travel as ``options_enc`` only. Until 0.1.9 the plaintext list went
+    along "for older app versions", but every phone app of the relay era (2026-09-07 on)
+    reads ``options_enc``, and the relay could read the plaintext list meanwhile.
     """
     if not key_b64 or event_type not in SENSITIVE_FIELDS:
         return payload
@@ -94,6 +95,7 @@ def encrypt_payload(event_type: str, payload: dict, key_b64: str | None) -> dict
             result[field] = encrypt(result[field], key_b64)
     if event_type == "question" and isinstance(result.get("options"), list) and result["options"]:
         result["options_enc"] = [encrypt(o, key_b64) for o in result["options"]]
+        del result["options"]
     return result
 
 
@@ -125,11 +127,15 @@ def make_event(event_type: str, payload: dict, key_b64: str | None) -> tuple[dic
 
 def make_command(args: str, key_b64: str | None, *, deliver_at: int | None = None,
                  status: str | None = None, source: str = "cli") -> dict:
-    """Build a text command document as the phone would, with encrypted args alongside plaintext."""
-    payload = {"command": "text", "args": args, "source": source}
+    """Build a text command document as the phone would: the prompt in ``args_enc`` only
+    when there is a key (the relay stores the document as sent), ``args`` in plaintext
+    only when there is none."""
+    payload = {"command": "text", "args": "", "source": source}
     enc = encrypt_field(args, key_b64)
     if enc and enc != args:
         payload["args_enc"] = enc
+    else:
+        payload["args"] = args
     doc = {"id": uuid.uuid4().hex, "type": "command", "ts": now_ms(), "consumed": False, "payload": payload}
     if deliver_at is not None:
         doc["deliver_at"] = int(deliver_at)
