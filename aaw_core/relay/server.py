@@ -96,9 +96,10 @@ CREATE TABLE IF NOT EXISTS devices (
   last_seen INTEGER DEFAULT 0);
 CREATE INDEX IF NOT EXISTS devices_computer ON devices(computer_id, role);
 CREATE TABLE IF NOT EXISTS events (
-  id TEXT PRIMARY KEY, computer_id TEXT NOT NULL, project_id TEXT NOT NULL,
+  id TEXT NOT NULL, computer_id TEXT NOT NULL, project_id TEXT NOT NULL,
   seq INTEGER NOT NULL, ts INTEGER NOT NULL, type TEXT NOT NULL, payload TEXT NOT NULL,
-  expires_at INTEGER NOT NULL);
+  expires_at INTEGER NOT NULL,
+  PRIMARY KEY (computer_id, id));
 CREATE INDEX IF NOT EXISTS events_stream ON events(computer_id, project_id, seq);
 CREATE TABLE IF NOT EXISTS seqs (
   computer_id TEXT NOT NULL, project_id TEXT NOT NULL, last_seq INTEGER NOT NULL,
@@ -107,8 +108,9 @@ CREATE TABLE IF NOT EXISTS cursors (
   token TEXT NOT NULL, computer_id TEXT NOT NULL, project_id TEXT NOT NULL, last_ack_seq INTEGER NOT NULL,
   PRIMARY KEY (token, computer_id, project_id));
 CREATE TABLE IF NOT EXISTS commands (
-  id TEXT PRIMARY KEY, computer_id TEXT NOT NULL, project_id TEXT NOT NULL, ts INTEGER NOT NULL,
-  doc TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0, expires_at INTEGER NOT NULL);
+  id TEXT NOT NULL, computer_id TEXT NOT NULL, project_id TEXT NOT NULL, ts INTEGER NOT NULL,
+  doc TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0, expires_at INTEGER NOT NULL,
+  PRIMARY KEY (computer_id, id));
 CREATE INDEX IF NOT EXISTS commands_open ON commands(computer_id, consumed);
 CREATE TABLE IF NOT EXISTS projects (
   computer_id TEXT NOT NULL, project_id TEXT NOT NULL, doc TEXT NOT NULL,
@@ -120,7 +122,7 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 # The store's on-disk format. 2 hashes the device and cursor tokens at rest; a relay
 # older than the store refuses to start (better a loud stop than every token silently
 # rejected), and the migration leaves a snapshot next to the store for a clean rollback.
-STORE_VERSION = 2
+STORE_VERSION = 3  # 2: hashed tokens; 3: keys scoped by computer, stored plaintext purged
 
 
 def _token_hash(token: str) -> str:
@@ -150,7 +152,8 @@ WS_PING_TIMEOUT_S = 60.0             # is closed by uvicorn: a dead one is reape
 HISTORY_MAX_EVENTS = 1000            # hard cap on one history response, whatever the client asks
 HISTORY_MAX_BYTES = 8 * 1024 * 1024  # and on its payload bytes (newest events win)
 FRAMES_PER_MINUTE = 1200             # per-connection budget for incoming frames
-STORED_BYTES_MAX = 64 * 1024 * 1024  # event payload bytes retained per computer
+STORED_BYTES_MAX = 64 * 1024 * 1024  # event payload plus command document bytes retained per computer
+COMMANDS_OPEN_MAX = 500              # unconsumed commands per computer; the rest is refused
 PUSHES_PER_MINUTE = 20               # per computer, mirroring the client-side contract
 REGISTRATIONS_PER_HOUR = 10          # new computer tokens per client address
 CONNECTIONS_PER_ADDR = 40            # concurrent sockets per client address
@@ -262,32 +265,73 @@ class Relay:
     async def _migrate_store(self) -> None:
         """Bring the store to STORE_VERSION, or refuse to serve a newer store.
 
-        A store without a version predates hashing: its plaintext device and cursor
-        tokens are hashed in place, after a snapshot copy (``<db>.pre-v2``) so a
-        rollback to the previous relay restores the snapshot instead of locking
-        every client out."""
+        Each step runs once, after a snapshot copy (``<db>.pre-v<N>``) so a rollback to
+        the previous relay restores the snapshot instead of locking every client out:
+        version 2 hashes the plaintext device and cursor tokens; version 3 scopes event
+        and command keys by computer and purges the plaintext that used to ride next
+        to encrypted fields."""
         row = await self._fetchone("SELECT value FROM meta WHERE key='store_version'")
-        if row is not None:
-            found = int(row["value"])
-            if found > STORE_VERSION:
-                raise RuntimeError(
-                    f"the store {self.db_path} is version {found}, newer than this relay"
-                    f" (version {STORE_VERSION}); run the newer relay, or restore the"
-                    f" snapshot it left next to the store")
+        found = int(row["value"]) if row is not None else 1
+        if found > STORE_VERSION:
+            raise RuntimeError(
+                f"the store {self.db_path} is version {found}, newer than this relay"
+                f" (version {STORE_VERSION}); run the newer relay, or restore the"
+                f" snapshot it left next to the store")
+        if found == STORE_VERSION:
             return
-        rows = await self._fetchall("SELECT token FROM devices")
-        legacy = [r["token"] for r in rows if not _is_token_hash(r["token"])]
-        if legacy:
-            self._snapshot_store()
-            for table in ("devices", "cursors"):
-                for r in await self._fetchall(f"SELECT DISTINCT token FROM {table}"):
-                    if not _is_token_hash(r["token"]):
-                        await self.db.execute(f"UPDATE {table} SET token=? WHERE token=?",
-                                              (_token_hash(r["token"]), r["token"]))
-            log.info("store migrated to version %d: %d device tokens hashed", STORE_VERSION, len(legacy))
+        self._snapshot_store()
+        if found < 2:
+            await self._migrate_hash_tokens()
+        if found < 3:
+            await self._migrate_scope_keys_and_purge_plaintext()
         await self.db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('store_version', ?)",
                               (str(STORE_VERSION),))
         await self.db.commit()
+
+    async def _migrate_hash_tokens(self) -> None:
+        rows = await self._fetchall("SELECT token FROM devices")
+        legacy = [r["token"] for r in rows if not _is_token_hash(r["token"])]
+        for table in ("devices", "cursors"):
+            for r in await self._fetchall(f"SELECT DISTINCT token FROM {table}"):
+                if not _is_token_hash(r["token"]):
+                    await self.db.execute(f"UPDATE {table} SET token=? WHERE token=?",
+                                          (_token_hash(r["token"]), r["token"]))
+        log.info("store migration: %d device tokens hashed", len(legacy))
+
+    async def _migrate_scope_keys_and_purge_plaintext(self) -> None:
+        """Review of 2026-10-23, R01 and R03. Event and command ids were the whole primary
+        key, so a computer writing another computer's id replaced that row; the keys are
+        now (computer_id, id). And documents were stored as sent, with the plaintext
+        prompt, answer, or option list next to its encrypted copy; those copies go."""
+        for table, columns in (
+            ("events", "id, computer_id, project_id, seq, ts, type, payload, expires_at"),
+            ("commands", "id, computer_id, project_id, ts, doc, consumed, expires_at"),
+        ):
+            await self.db.execute(f"ALTER TABLE {table} RENAME TO {table}_v2")
+            await self.db.executescript(_SCHEMA)  # the scoped tables, fresh
+            await self.db.execute(f"INSERT OR REPLACE INTO {table}({columns}) SELECT {columns} FROM {table}_v2")
+            await self.db.execute(f"DROP TABLE {table}_v2")
+        purged = 0
+        for r in await self._fetchall("SELECT computer_id, id, doc FROM commands"):
+            doc = json.loads(r["doc"])
+            payload = doc.get("payload") or {}
+            changed = False
+            if payload.get("args_enc") and payload.get("args"):
+                payload["args"] = ""; changed = True
+            if payload.get("answer_enc") and payload.get("answer"):
+                payload["answer"] = ""; changed = True
+            if changed:
+                purged += 1
+                await self.db.execute("UPDATE commands SET doc=? WHERE computer_id=? AND id=?",
+                                      (json.dumps(doc), r["computer_id"], r["id"]))
+        for r in await self._fetchall("SELECT computer_id, id, payload FROM events WHERE type='question'"):
+            payload = json.loads(r["payload"])
+            if payload.get("options_enc") and payload.get("options"):
+                del payload["options"]
+                purged += 1
+                await self.db.execute("UPDATE events SET payload=? WHERE computer_id=? AND id=?",
+                                      (json.dumps(payload), r["computer_id"], r["id"]))
+        log.info("store migration: keys scoped by computer; plaintext purged from %d documents", purged)
 
     def _snapshot_store(self) -> None:
         """A consistent copy of the store next to it, taken once before a migration."""
@@ -374,13 +418,28 @@ class Relay:
         return ws.client.host if ws.client else "?"
 
     async def _stored_for(self, computer_id: str) -> int:
+        """Bytes this computer keeps on the relay: event payloads and command documents."""
         cached = self._stored_bytes.get(computer_id)
         if cached is None:
-            row = await self._fetchone(
+            events = await self._fetchone(
                 "SELECT COALESCE(SUM(LENGTH(payload)), 0) AS n FROM events WHERE computer_id=?", (computer_id,))
-            cached = int(row["n"])
+            commands = await self._fetchone(
+                "SELECT COALESCE(SUM(LENGTH(doc)), 0) AS n FROM commands WHERE computer_id=?", (computer_id,))
+            cached = int(events["n"]) + int(commands["n"])
             self._stored_bytes[computer_id] = cached
         return cached
+
+    async def _over_quota(self, computer_id: str, more: int) -> bool:
+        """True when `more` bytes would take the computer past STORED_BYTES_MAX; the cache
+        only grows between cleanups, so a recount happens before an actual refusal."""
+        stored = await self._stored_for(computer_id)
+        if stored + more > STORED_BYTES_MAX:
+            self._stored_bytes.pop(computer_id, None)
+            stored = await self._stored_for(computer_id)
+            if stored + more > STORED_BYTES_MAX:
+                return True
+        self._stored_bytes[computer_id] = stored + more
+        return False
 
     # ── connection handling ───────────────────────────────────────────────────
 
@@ -572,16 +631,10 @@ class Relay:
             await conn.send({"type": "error", "message": "invalid event"})
             return
         payload_json = json.dumps(event.get("payload") or {})
-        stored = await self._stored_for(conn.computer_id)
-        if stored + len(payload_json) > STORED_BYTES_MAX:
-            # The cache only grows between cleanups; recount before actually refusing.
-            self._stored_bytes.pop(conn.computer_id, None)
-            stored = await self._stored_for(conn.computer_id)
-            if stored + len(payload_json) > STORED_BYTES_MAX:
-                log.warning("event refused: computer %s is over its storage quota", conn.computer_id)
-                await conn.send({"type": "error", "message": "storage quota exceeded"})
-                return
-        self._stored_bytes[conn.computer_id] = stored + len(payload_json)
+        if await self._over_quota(conn.computer_id, len(payload_json)):
+            log.warning("event refused: computer %s is over its storage quota", conn.computer_id)
+            await conn.send({"type": "error", "message": "storage quota exceeded"})
+            return
         async with self.write_lock:
             row = await self._fetchone("SELECT last_seq FROM seqs WHERE computer_id=? AND project_id=?",
                                        (conn.computer_id, project_id))
@@ -724,10 +777,23 @@ class Relay:
 
     async def _on_command(self, conn: Conn, frame: dict) -> None:
         project_id, doc = frame["project_id"], frame["command"]
+        if _bad_str(project_id, "project_id") or _bad_str(doc.get("id"), "event_id"):
+            await conn.send({"type": "error", "message": "invalid command"})
+            return
+        doc_json = json.dumps(doc)
+        # Commands share the computer's storage budget (review R02: they had none, and a
+        # registered computer could fill the relay's disk with them), and only so many
+        # may wait unconsumed.
+        open_row = await self._fetchone("SELECT COUNT(*) AS n FROM commands WHERE computer_id=? AND consumed=0",
+                                        (conn.computer_id,))
+        if int(open_row["n"]) >= COMMANDS_OPEN_MAX or await self._over_quota(conn.computer_id, len(doc_json)):
+            log.warning("command refused: computer %s is over its storage quota", conn.computer_id)
+            await conn.send({"type": "error", "message": "storage quota exceeded"})
+            return
         await self._exec(
             "INSERT OR REPLACE INTO commands(id, computer_id, project_id, ts, doc, consumed, expires_at)"
             " VALUES(?,?,?,?,?,?,?)",
-            (doc["id"], conn.computer_id, project_id, int(doc.get("ts", 0)), json.dumps(doc),
+            (doc["id"], conn.computer_id, project_id, int(doc.get("ts", 0)), doc_json,
              1 if doc.get("consumed") else 0, _now_s() + COMMAND_TTL_DAYS * 86400))
         await self._forward(conn.computer_id, {"type": "command", "project_id": project_id, "command": doc},
                             exclude=conn.id)
@@ -740,8 +806,13 @@ class Relay:
             return
         doc = json.loads(row["doc"])
         doc.update(fields)
-        await self._exec("UPDATE commands SET doc=?, consumed=? WHERE id=?",
-                         (json.dumps(doc), 1 if doc.get("consumed") else 0, command_id))
+        doc_json = json.dumps(doc)
+        growth = len(doc_json) - len(row["doc"])
+        if growth > 0 and await self._over_quota(conn.computer_id, growth):
+            await conn.send({"type": "error", "message": "storage quota exceeded"})
+            return
+        await self._exec("UPDATE commands SET doc=?, consumed=? WHERE id=? AND computer_id=?",
+                         (doc_json, 1 if doc.get("consumed") else 0, command_id, conn.computer_id))
         await self._forward(conn.computer_id, {"type": "command_update", "project_id": project_id,
                                                "command_id": command_id, "fields": fields}, exclude=conn.id)
 

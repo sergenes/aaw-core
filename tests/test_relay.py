@@ -769,3 +769,49 @@ def test_hello_deadline_closes_silent_sockets(relay, monkeypatch):
         time.sleep(0.6)
         frames = _drain_ws(ws)
         assert {"type": "error", "message": "hello timeout"} in frames
+
+
+def test_two_computers_may_use_the_same_event_and_command_ids(relay):
+    """Review R03 (2026-10-23): ids were the whole primary key, so computer B writing A's
+    event or command id replaced A's row. Keys are scoped by computer now."""
+    with relay.websocket_connect("/v1/ws") as a, relay.websocket_connect("/v1/ws") as b:
+        hello_computer(a, "atok", "c-a")
+        hello_computer(b, "btok", "c-b")
+        a.send_json({"type": "event", "project_id": "p", "event": event("e1", "from a")})
+        b.send_json({"type": "event", "project_id": "p", "event": event("e1", "from b")})
+        a.send_json({"type": "command", "project_id": "p", "command": {"id": "c1", "type": "command", "ts": 1,
+                     "consumed": False, "payload": {"command": "text", "args_enc": "a"}}})
+        b.send_json({"type": "command", "project_id": "p", "command": {"id": "c1", "type": "command", "ts": 1,
+                     "consumed": False, "payload": {"command": "text", "args_enc": "b"}}})
+        for ws, who in ((a, "a"), (b, "b")):
+            ws.send_json({"type": "history", "req": "h", "project_id": "p"})
+            got = ws.receive_json()
+            assert [e["payload"]["content"] for e in got["events"]] == [f"from {who}"]
+            ws.send_json({"type": "commands", "req": "c", "project_id": "p"})
+            assert [c["payload"]["args_enc"] for c in ws.receive_json()["commands"]] == [who]
+
+
+def test_command_quota_refuses_oversized_and_too_many(relay, monkeypatch):
+    """Review R02 (2026-10-23): commands had no storage budget."""
+    from aaw_core.relay import server
+
+    monkeypatch.setattr(server, "STORED_BYTES_MAX", 400)
+    monkeypatch.setattr(server, "COMMANDS_OPEN_MAX", 2)
+    with relay.websocket_connect("/v1/ws") as comp:
+        hello_computer(comp)
+        big = {"id": "big", "type": "command", "ts": 1, "consumed": False,
+               "payload": {"command": "text", "args_enc": "x" * 500}}
+        comp.send_json({"type": "command", "project_id": "p", "command": big})
+        assert comp.receive_json() == {"type": "error", "message": "storage quota exceeded"}
+        for i in range(3):
+            comp.send_json({"type": "command", "project_id": "p", "command": {
+                "id": f"c{i}", "type": "command", "ts": 1, "consumed": False, "payload": {"command": "text", "args_enc": "s"}}})
+        assert comp.receive_json() == {"type": "error", "message": "storage quota exceeded"}  # the third
+        comp.send_json({"type": "commands", "req": "c", "project_id": "p"})
+        assert [c["id"] for c in comp.receive_json()["commands"]] == ["c0", "c1"]
+        # a consumed one frees a slot
+        comp.send_json({"type": "command_update", "project_id": "p", "command_id": "c0", "fields": {"consumed": True}})
+        comp.send_json({"type": "command", "project_id": "p", "command": {
+            "id": "c3", "type": "command", "ts": 1, "consumed": False, "payload": {"command": "text", "args_enc": "s"}}})
+        comp.send_json({"type": "commands", "req": "c", "project_id": "p"})
+        assert [c["id"] for c in comp.receive_json()["commands"]] == ["c1", "c3"]
