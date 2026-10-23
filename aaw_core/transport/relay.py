@@ -49,6 +49,14 @@ from aaw_core.transport.base import (
 _REQUEST_TIMEOUT = 15.0
 _RECONNECT_MIN = 1.0
 _RECONNECT_MAX = 30.0
+# A loaded Mac (load average over 80 was measured with an IDE indexing) starves these
+# daemons for seconds at a time. The library's defaults, a 10 s handshake and a 20 s ping
+# answer, then churn: 1,725 "timed out during opening handshake" lines in one Mac's logs,
+# and twenty minutes to reconnect after a wake. These give a slow host room; the relay
+# side reaps a truly dead socket on its own schedule (WS_PING_TIMEOUT_S there).
+_OPEN_TIMEOUT = 30.0
+_PING_INTERVAL = 20.0
+_PING_TIMEOUT = 60.0
 
 
 def new_token() -> str:
@@ -143,7 +151,8 @@ class RelayTransport:
         backoff = _RECONNECT_MIN
         while not self._stop.is_set():
             try:
-                async with websockets.connect(self.relay_url, max_size=8 * 1024 * 1024) as ws:
+                async with websockets.connect(self.relay_url, max_size=8 * 1024 * 1024, open_timeout=_OPEN_TIMEOUT,
+                                              ping_interval=_PING_INTERVAL, ping_timeout=_PING_TIMEOUT) as ws:
                     await ws.send(json.dumps({
                         "type": "hello", "role": "computer", "token": self.token,
                         "computer_id": self.computer_id, "computer_name": self.computer_name,
@@ -156,7 +165,8 @@ class RelayTransport:
                     backoff = _RECONNECT_MIN
                     await self._session(ws)
             except (TimeoutError, OSError, websockets.WebSocketException, ConnectionError) as e:
-                print(f"[relay] disconnected: {e}", file=sys.stderr, flush=True)
+                stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                print(f"[relay] {stamp} disconnected: {e}", file=sys.stderr, flush=True)
             finally:
                 self.connected.clear()
             if self._stop.is_set():
