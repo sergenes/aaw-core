@@ -37,9 +37,12 @@ def test_encrypt_payload_only_touches_sensitive_fields():
     assert encrypt_payload("status", {"content": "x"}, KEY) == {"content": "x"}  # unknown type: untouched
 
 
-def test_question_options_get_an_encrypted_copy_alongside_plaintext():
+def test_question_options_travel_encrypted_only():
+    """The relay stores the event as sent; the plaintext list that went along "for older
+    apps" let it read every option (a file name, a command). Every relay-era phone reads
+    options_enc, so only the count remains in the clear."""
     out = encrypt_payload("question", {"question": "Allow?", "context": "", "options": ["Yes", "No"]}, KEY)
-    assert out["options"] == ["Yes", "No"]
+    assert "options" not in out
     assert [decrypt(o, KEY) for o in out["options_enc"]] == ["Yes", "No"]
     assert is_encrypted(out["question"])
     assert out["context"] == ""  # empty fields are not encrypted
@@ -57,10 +60,11 @@ def test_make_command_and_command_text():
     doc = make_command("run tests", KEY, deliver_at=1_800_000_000_000)
     assert doc["type"] == "command" and doc["consumed"] is False
     assert doc["status"] == "scheduled" and doc["deliver_at"] == 1_800_000_000_000
-    assert doc["payload"]["args"] == "run tests" and is_encrypted(doc["payload"]["args_enc"])
+    assert doc["payload"]["args"] == "" and is_encrypted(doc["payload"]["args_enc"])  # the relay never sees it
     assert command_text(doc, KEY) == "run tests"
     assert "deliver_at" not in make_command("now", KEY)
-    assert "args_enc" not in make_command("plain", None)["payload"]
+    plain = make_command("plain", None)["payload"]
+    assert "args_enc" not in plain and plain["args"] == "plain"  # no key: plaintext is all there is
 
 
 def test_select_deliverable_gate():

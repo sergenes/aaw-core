@@ -28,7 +28,7 @@ One document per feed item:
 | type | payload | encrypted fields |
 | --- | --- | --- |
 | `message` | `role` (`user` \| `assistant`), `content`, `agent` | `content` |
-| `question` | `question`, `context`, `options` (list), `options_enc` (encrypted copy of each option), `kind` (`permission` \| `ask_user` \| `multiselect` \| ...), `timeout_at`, `agent`, and kind-specific extras | `question`, `context`, each of `options_enc` |
+| `question` | `question`, `context`, `options_enc` (each option encrypted; since 0.1.9 the plaintext `options` list is not sent, every relay-era app reads `options_enc`), `kind` (`permission` \| `ask_user` \| `multiselect` \| ...), `timeout_at`, `agent`, and kind-specific extras | `question`, `context`, each of `options_enc` |
 | `notification` | `message`, `level` (`info` \| `success` \| `warning` \| `error`) | `message` |
 | `reminder` | `reset_at` (epoch s), `reset_label`, agent details | none |
 
@@ -43,10 +43,10 @@ The plaintext copy of every event is appended to `<state dir>/sessions/<session 
  "payload": {...}, "deliver_at"?: <epoch ms>, "status"?: "scheduled" | "canceled" | "done" | "failed"}
 ```
 
-- A prompt: `payload = {"command": "text", "args": "<plaintext or empty>", "args_enc": <encrypted>, "source": "phone" | "cli"}`.
-  The daemon reads `args_enc` when present, else `args`.
+- A prompt: `payload = {"command": "text", "args": "", "args_enc": <encrypted>, "source": "phone" | "cli"}`.
+  The daemon reads `args_enc` when present, else `args`. A writer with a key sends `args_enc` only (since 0.1.9; `args` stays empty), so the relay and its backups never hold the prompt.
   Slash commands (`/restart`, `/stop`, `/usage`, `/approve` ...) travel the same way.
-- An answer to a question: `type: "answer"`, `payload = {"question_id": "<event id>", "answer_enc": <encrypted>}` (`answer` in plaintext is accepted for old clients).
+- An answer to a question: `type: "answer"`, `payload = {"question_id": "<event id>", "answer_enc": <encrypted>}` (`answer` in plaintext is accepted for old clients; a writer with a key sends `answer_enc` only).
 - A scheduled prompt carries `deliver_at`; the daemon leaves it queued until then and reports `scheduled_count` and `next_scheduled_at` on the project document.
   `status: "canceled"` withdraws it.
 - Consuming a command sets `consumed: true` and `status: done | failed` through a `command_update`; the relay stops replaying it.
