@@ -100,11 +100,16 @@ def stale_notice(cmd: dict, now_s: float | None = None) -> str | None:
 
 
 def forward_text(transport: RelayTransport, session: str, agent: str, text: str,
-                 turn_watch: dict | None = None) -> None:
+                 turn_watch: dict | None = None, command_id: str | None = None) -> None:
     """Type a message into the agent and echo it to the feed once it was actually
-    delivered; otherwise say so, so the user resends instead of waiting."""
+    delivered; otherwise say so, so the user resends instead of waiting. The echo names
+    the command it delivered, so a phone can match its own prompt to the echo by id
+    instead of by text (two prompts saying "continue" are two rows, not one)."""
     if tmux.send_text(text, session, agent):
-        transport.write_event("message", {"role": "user", "content": text, "agent": agent}, via="daemon")
+        payload = {"role": "user", "content": text, "agent": agent}
+        if command_id:
+            payload["command_id"] = command_id
+        transport.write_event("message", payload, via="daemon")
         if turn_watch is not None:
             # Watched by the main loop: a prompt the agent refuses without starting a
             # turn (out of usage credits) must reach the phone as an error.
@@ -233,10 +238,10 @@ def handle_command(cmd: dict, transport: RelayTransport, settings: Settings, *, 
             usage.fetch_usage(transport, project_dir, agent)
         else:
             transport.set_project_status("running")
-            forward_text(transport, session, agent, args, turn_watch)
+            forward_text(transport, session, agent, args, turn_watch, command_id=cmd.get("id"))
     elif command in ("btw", "prompt"):  # legacy
         transport.set_project_status("running")
-        forward_text(transport, session, agent, args, turn_watch)
+        forward_text(transport, session, agent, args, turn_watch, command_id=cmd.get("id"))
     elif command == "restart":
         restart()
     elif command == "stop":
