@@ -117,7 +117,7 @@ The phone's `request` frames the supervisor answers (`response {req, kind, paylo
 When no computer socket is live the relay itself answers `{"error": "offline"}`.
 
 The relay enforces limits on every client (the `Abuse limits` constants in `aaw_core/relay/server.py`).
-Incoming frames are capped at 1 MiB and budgeted per connection; a socket must say hello within 10 s.
+Incoming frames are capped at 1 MiB and budgeted per connection; a socket must say hello within 10 s. Each computer keeps at most 64 MiB on the relay, event payloads and command documents together, and at most 500 unconsumed commands; past that a write is answered with `error: storage quota exceeded`. The store (version 3 since 0.1.9) keys events and commands by computer and id, so two computers may use the same ids, and a migration from version 2 purges the plaintext `args`, `answer` and `options` that older writers stored next to their encrypted copies, after a rollback snapshot `<db>.pre-v3`.
 A `history` response returns at most 1000 events and 8 MiB of payload, newest first, whatever `limit` asks.
 Each computer may retain at most 64 MiB of event payload; an `event` beyond that is answered with `error {message: "storage quota exceeded"}` and not stored.
 A fresh token cannot register a `computer_id` that is live or was seen in the last 30 days under another token; only a long-idle id (a wiped reinstall) rebinds.
