@@ -109,6 +109,82 @@ MODEL_PICKER_PANE = """\
    Enter to set as default · s to use this session only · Esc to cancel
 """
 
+# Claude Code 2.1.309, 200x50, captured live 2026-10-23: /model typed while a turn had a
+# background shell running. The agent's last ⏺ line is above the user's own "❯ /model"
+# line, so it is history, not this menu's question.
+MODEL_PICKER_MIDTURN_PANE = """\
+ ▐▛███▛█   Claude Code v2.1.309
+ ▝▝   ▝▝   ~/ai_projects/aaw-repro
+
+  Updated to latest. Got 4 features, 28 bugfixes, and 13 other changes.
+  code.claude.com/docs/en/changelog for details
+
+
+❯ use the Bash tool to run: sleep 25 && date
+
+⏺ The shell blocks sleep in the foreground, so I'll run the command in the background instead.
+
+⏺ Bash(sleep 25 && date)
+  ⎿  Running in the background (↓ to manage)
+  ⎿  Allowed by auto mode classifier
+
+⏺ The command is running in the background, because this shell doesn't allow sleep in the foreground. I'll get a notification when it finishes in about 25 seconds and will show you the date it prints
+  then.
+
+✻ Brewed for 9s · done 11:12 AM · 1 shell still running
+
+❯ /model
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Select model
+  Switch between Claude models. Your pick becomes the default for new sessions. For other/previous model names, specify with --model.
+
+    1.  Default (recommended)  Opus 5.5 · Best for everyday, complex tasks
+  ❯ 2.  Opus 5.5 ✔             For complex work and everyday tasks
+    3.  Fable 5.1              For your toughest challenges
+    4.  Sonnet 5.5             Most efficient for simpler tasks
+    5.  Haiku 5.5              Fastest for quick answers
+    6.  Haiku 4.5              Fastest for quick answers
+    7.  Sonnet 5               Efficient for routine tasks
+    8.  Opus 5                 Best for everyday, complex tasks
+    9.  Fable 5                Most capable for your hardest and longest-running tasks
+  ↓ 10. Opus 4.8               Best for everyday, complex tasks
+     … +3 models
+
+  ◐ Medium effort (default) ←/→ to adjust
+
+  Use /fast to turn on Fast mode (Opus 5.5).
+
+  Enter to set as default · s to use this session only · Esc to cancel
+"""
+
+# Claude Code 2.1.309, 200x50, captured live 2026-10-23: a Bash tool approval.
+BASH_APPROVAL_PANE = """\
+ ▐▛███▛█   Claude Code v2.1.309
+ ▝▝   ▝▝   ~/ai_projects/aaw-repro
+
+
+❯ use the Bash tool to run: touch hello.txt
+
+⏺ Bash(touch hello.txt)
+  ⎿  Waiting…
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Bash command
+ Tip: auto mode handles these prompts for you — choose "switch to auto mode" below
+ Create empty hello.txt file
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ touch hello.txt
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and always allow access to /Users/sergenes/ai_projects/aaw-repro from this project
+   3. Yes, and switch to auto mode · auto mode handles these prompts for you
+   4. No
+
+ Esc to cancel · Tab to amend
+"""
+
 AQ_SCROLLING_PANE = """\
 Which city?
 
@@ -195,7 +271,8 @@ def test_scrolling_menus_count_their_edge_rows():
     assert [o.split("  ")[0] for o in perm["options"]] == ["Default (recommended)", "Opus"]
     assert "✔" not in perm["options"][0]  # the current-choice mark is not part of the name
     assert perm["cursor"] == 0
-    assert perm["question"].startswith("Switch between Claude models.")  # the card's text
+    assert perm["question"] == "Select model"  # the menu's own title, the card's text
+    assert perm["menu"] is True
     aq = detect.detect_ask_user_question(AQ_SCROLLING_PANE)
     assert aq is not None
     assert aq["options"] == ["Austin", "Boston", "Chicago", "Denver"]
@@ -407,3 +484,23 @@ def test_create_session_pause_holds_in_zsh_not_just_bash(tmp_path, monkeypatch):
     assert "printf 'Press Enter" in cmd   # a portable prompt
     assert "read -r" in cmd               # a bare read that blocks in bash and zsh
     assert tmux.SESSION_ENDED_SENTINEL in cmd
+
+
+def test_a_menu_the_user_opened_is_titled_by_its_header_not_the_last_tool_line():
+    """2026-10-23: /model opened mid-turn reached the phone titled with the agent's last
+    tool line (its git commit) and labeled a permission prompt."""
+    perm = detect.detect_permission_prompt(MODEL_PICKER_MIDTURN_PANE)
+    assert perm is not None and perm["menu"] is True
+    assert perm["question"] == "Select model"
+    assert len(perm["options"]) == 10 and perm["options"][0].startswith("Default (recommended)")
+    assert perm["cursor"] == 1  # ❯ on the current model, row 2
+    assert not detect.is_yes_no_shaped(perm["options"])
+
+
+def test_a_tool_approval_keeps_its_tool_line_and_is_not_a_menu():
+    perm = detect.detect_permission_prompt(BASH_APPROVAL_PANE)
+    assert perm is not None and perm["menu"] is False
+    assert perm["question"] == "Bash(touch hello.txt)"
+    assert perm["options"][0] == "Yes" and perm["options"][-1] == "No"
+    for pane in (PERM_PANE, PLAN_MENU_PANE):  # the older shapes are approvals too
+        assert detect.detect_permission_prompt(pane)["menu"] is False

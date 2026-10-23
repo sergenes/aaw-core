@@ -371,6 +371,7 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
     perm_hash: str | None = None
     perm_options: list = []
     perm_cursor: int | None = None  # the option the ❯ cursor sat on when the prompt was read
+    perm_menu = False  # the prompt on screen is a menu the user opened, not a tool approval
     # Claude's "trust this folder" dialog (first open of a folder)
     trust_question_id: str | None = None
     trust_hash: str | None = None
@@ -414,6 +415,15 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
                                                       "context": context, "agent": agent, **extra})
         transport.set_project_status("waiting", pending_question_id=event_id)
         return event_id
+
+    def perm_card(perm: dict) -> str:
+        """Send a pane menu to the phone: a tool approval, or a menu the user opened."""
+        if perm.get("menu"):
+            return send_question(perm["question"], perm["options"], "choice", "Claude Code menu")
+        return send_question(perm["question"], perm["options"], "permission", "Claude Code permission prompt")
+
+    def may_auto_approve(perm: dict) -> bool:
+        return not perm.get("menu") and auto_approve() and detect.is_yes_no_shaped(perm["options"])
 
     turn_watch: dict = {}
     while running:
@@ -513,20 +523,27 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
                     check_claude_ui_version(settings, perm)
                     perm_hash, perm_first_seen, perm_options = perm["hash"], time.monotonic(), perm["options"]
                     perm_cursor = perm.get("cursor")
-                    if auto_approve() and detect.is_yes_no_shaped(perm["options"]):
+                    perm_menu = bool(perm.get("menu"))
+                    replaced = perm_question_id  # a card for the menu this one replaced
+                    if may_auto_approve(perm):
                         tmux.send_keys(session, "1")  # first option: Yes
                         perm_question_id = None
                         log("permission prompt auto-approved (key 1)")
                         flush_pending_message(transport, session, agent)
                     elif is_mobile_mode(settings):
-                        perm_question_id = send_question(perm["question"], perm["options"], "permission",
-                                                         "Claude Code permission prompt")
-                        log(f"permission prompt sent to the phone ({perm_question_id[:8]})")
+                        perm_question_id = perm_card(perm)  # takes over pending_question_id
+                        log(f"{'menu' if perm_menu else 'permission prompt'} sent to the phone ({perm_question_id[:8]})")
                     else:
                         perm_question_id = None
                         log("permission prompt detected (desktop mode; not forwarding)")
+                    if replaced and perm_question_id is None:
+                        # One menu replaced another between two polls, so the "gone" branch
+                        # never ran: the old card would stay on the phone until the turn ended.
+                        transport.set_project_status("running", pending_question_id="")
+                        log(f"earlier card {replaced[:8]} cleared (its menu was replaced)")
                 elif perm and perm["hash"] == perm_hash:
-                    if time.monotonic() - perm_first_seen >= 5.0 and auto_approve() and detect.is_yes_no_shaped(perm_options):
+                    if time.monotonic() - perm_first_seen >= 5.0 and not perm_menu and auto_approve() \
+                            and detect.is_yes_no_shaped(perm_options):
                         tmux.send_keys(session, "1")  # the earlier key may have been dropped
                         perm_first_seen = time.monotonic()
                         log("auto_approve stuck retry: resent key 1")
@@ -535,6 +552,7 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
                         transport.set_project_status("running", pending_question_id="")
                         log("permission prompt gone (answered on the desktop)")
                     perm_question_id, perm_hash, perm_first_seen, perm_options = None, None, 0.0, []
+                    perm_menu = False
                     flush_pending_message(transport, session, agent)  # a message queued behind the prompt
                 elif not perm and not aq_hash and agent == "claude" and now - last_mismatch_warn >= 5.0:
                     if claude_pid is None:
@@ -801,7 +819,7 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
                     stuck = detect.detect_permission_prompt(tmux.visible_pane(session))
                     if stuck:
                         if perm_question_id and stuck["hash"] == perm_hash:
-                            if auto_approve() and detect.is_yes_no_shaped(stuck["options"]):
+                            if may_auto_approve(stuck):
                                 tmux.send_keys(session, "1")
                                 transport.set_project_status("running", pending_question_id="")
                                 perm_question_id, perm_hash = None, stuck["hash"]
@@ -809,15 +827,18 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
                                 flush_pending_message(transport, session, agent)
                             else:
                                 log(f"stuck prompt already pending on the phone ({perm_question_id[:8]}); not resending")
-                        elif auto_approve() and detect.is_yes_no_shaped(stuck["options"]):
+                        elif may_auto_approve(stuck):
                             tmux.send_keys(session, "1")
+                            if perm_question_id:  # a card for an earlier menu, now replaced
+                                transport.set_project_status("running", pending_question_id="")
                             perm_hash, perm_question_id, perm_options = stuck["hash"], None, stuck["options"]
+                            perm_menu = False
                             log("stuck prompt auto-approved (key 1)")
                             flush_pending_message(transport, session, agent)
                         else:
-                            perm_question_id = send_question(stuck["question"], stuck["options"], "permission",
-                                                             "Claude Code permission prompt")
+                            perm_question_id = perm_card(stuck)
                             perm_hash, perm_options, perm_cursor = stuck["hash"], stuck["options"], stuck.get("cursor")
+                            perm_menu = bool(stuck.get("menu"))
                             log(f"phone active: forwarded the stuck prompt ({perm_question_id[:8]})")
                 backoff_until = 0.0
             except Exception as e:  # noqa: BLE001

@@ -184,3 +184,71 @@ def test_a_prompt_sent_during_the_stopped_gap_lands_on_restart(host):
         phone.close()
     finally:
         reader.stop(flush_timeout=0)
+
+
+MENU_THEN_PROMPT_AGENT = r"""#!/usr/bin/env bash
+echo "fake claude ready"
+read -r line
+printf '\033[2J\033[H'
+printf '⏺ Bash(git commit -m "earlier work")\n  ⎿  Done\n✻ Brewed for 9s\n❯ /model\n'
+printf '────────────────────────────────────────\n  Select model\n'
+printf '  Switch between Claude models. Your pick becomes the default for new sessions.\n\n'
+printf '  ❯ 1. Default (recommended)  Opus 5.5\n    2. Fable 5.1              For your toughest challenges\n'
+printf '    3. Sonnet 5.5             Most efficient for simpler tasks\n\n'
+printf '  Enter to set as default · s to use this session only · Esc to cancel\n'
+read -r line
+# One write: the model menu is replaced by a tool approval between two daemon polls,
+# so the daemon never sees a pane without a menu (the 2026-10-23 stuck card).
+printf '\033[2J\033[H⏺ Bash(touch hello.txt)\n  ⎿  Waiting…\n────────────────────────────────────────\n Bash command\n touch hello.txt\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n Esc to cancel · Tab to amend\n'
+read -r -n1 key  # Claude takes the answer as a single keypress
+echo "you said: $key"
+while IFS= read -r line; do echo "you said: $line"; done
+"""
+
+
+def test_a_menu_replaced_by_an_auto_approved_prompt_leaves_no_card(host):
+    """2026-10-23: /model opened mid-turn reached the phone as a "permission prompt" titled
+    with the agent's last git command, and when the next tool approval replaced it and
+    auto-approve answered that, the model card stayed on the phone until the turn ended.
+    The menu must arrive as a choice titled by its header, and the card must clear when
+    the menu it belongs to is replaced."""
+    settings, ident, key, project, relay_url = host
+    fake = shutil.which("claude")
+    with open(fake, "w") as f:
+        f.write(MENU_THEN_PROMPT_AGENT)
+    settings.mobile_mode_file.write_text("manual")
+    sessions.start_session(settings, project, SESSION_ID, "claude")
+    session = tmux_session(SESSION_ID)
+    assert _poll_until(lambda: "fake claude ready" in tmux.visible_pane(session), timeout=15)
+
+    reader = RelayTransport(relay_url=relay_url, token=ident.token, computer_id=ident.computer_id,
+                            project_id="_test", sessions_dir=settings.sessions_dir, enc_key=key).start()
+    try:
+        assert reader.wait_connected(10)
+        assert _poll_until(lambda: (reader.list_projects().get(SESSION_ID) or {}).get("status")
+                           in ("running", "idle"), timeout=30)
+        phone = _phone_connect(relay_url, reader.register_phone_token())
+        phone.send(json.dumps({"type": "subscribe", "project_id": SESSION_ID}))
+        phone.send(json.dumps({"type": "state", "project_id": SESSION_ID, "fields": {"auto_approve": True}}))
+        assert _poll_until(lambda: (reader.list_projects().get(SESSION_ID) or {}).get("auto_approve"), timeout=15)
+
+        # the user opens /model: a choice card titled by the menu, never auto-answered
+        tmux.send_keys(session, "go", "Enter")
+        ev = _recv_until(phone, lambda f: f.get("type") == "event" and f["event"]["type"] == "question",
+                         timeout=30)
+        payload = ev["event"]["payload"]
+        assert payload["kind"] == "choice"
+        assert decrypt(payload["question"], key) == "Select model"
+        card = ev["event"]["id"]
+        assert _poll_until(lambda: (reader.list_projects().get(SESSION_ID) or {}).get("pending_question_id")
+                           == card, timeout=15)
+        assert "you said" not in tmux.visible_pane(session)  # no key went into the menu
+
+        # the menu gives way to a Yes/No approval in one screen write; auto-approve answers it
+        tmux.send_keys(session, "next", "Enter")
+        assert _poll_until(lambda: "you said: 1" in tmux.visible_pane(session), timeout=30)
+        assert _poll_until(lambda: not (reader.list_projects().get(SESSION_ID) or {}).get("pending_question_id"),
+                           timeout=15)
+        phone.close()
+    finally:
+        reader.stop(flush_timeout=0)
