@@ -56,7 +56,8 @@ def pane_raw(session: str) -> str:
 # ── transcript ──────────────────────────────────────────────────────────────
 
 
-MODEL_TAIL_BYTES = 256 * 1024  # every Claude turn and every Codex turn_context names the model
+MODEL_BLOCK_BYTES = 256 * 1024  # the backward scan's step
+MODEL_SCAN_BYTES = 64 * 1024 * 1024  # how far back a transcript is searched for its model
 
 
 def _latest_real_entry(path_str: str):
@@ -79,37 +80,78 @@ def _latest_real_entry(path_str: str):
     return None
 
 
+def _usable_model(value) -> str:
+    """A model id worth showing: a non-empty string that is not a placeholder."""
+    if isinstance(value, str):
+        value = value.strip()
+        if value and not value.startswith("<") and value != "auto":  # "<synthetic>" is no model
+            return value
+    return ""
+
+
+def model_from_hook(payload: dict) -> str:
+    """The model the hook input names. Codex puts the active model slug in every hook's
+    input (UserPromptSubmit, Stop, SessionStart, since 2026-03); Claude Code names it on
+    SessionStart. Truer than the transcript, and there when the transcript is not yet."""
+    return _usable_model(payload.get("model"))
+
+
+def _model_in_entry(entry: dict, agent: str) -> str:
+    if agent == "codex":
+        payload = entry.get("payload") or {}
+        if not isinstance(payload, dict):
+            return ""
+        settings = payload.get("thread_settings")
+        return _usable_model(payload.get("model") or (settings.get("model") if isinstance(settings, dict) else None))
+    msg = entry.get("message") or {}
+    return _usable_model(msg.get("model")) if isinstance(msg, dict) and msg.get("role") == "assistant" else ""
+
+
 def model_from_transcript(path_str: str, agent: str = "claude") -> str:
-    """The model the agent answered with, read from its own transcript, or "" when unknown.
-    Claude's assistant entries carry message.model; a Codex rollout records the model in
-    its turn_context entries (and thread_settings_applied at start). The newest entry
-    wins, so a /model switch shows on the phone after the next turn. Only the file's tail
-    is read: a long session's transcript runs to tens of megabytes."""
+    """The newest model the agent's own transcript records, or "" when it names none.
+    Claude's assistant entries carry message.model; a Codex rollout records the model once
+    per turn (turn_context, and thread_settings_applied at start), so one long Codex turn
+    leaves it megabytes from the end. The file is read backwards in fixed blocks, a line
+    that spans two blocks kept whole, and the scan stops at the newest record: never the
+    whole file at once, at most MODEL_SCAN_BYTES of it."""
     path = Path(path_str)
-    if not path_str or not path.exists():
+    if not path_str or not path.is_file():
         return ""
+    needle = b'"model"'
     try:
         with path.open("rb") as f:
-            f.seek(max(0, path.stat().st_size - MODEL_TAIL_BYTES))
-            lines = f.read().decode("utf-8", errors="replace").split("\n")
+            pos = f.seek(0, 2)
+            floor = max(0, pos - MODEL_SCAN_BYTES)
+            carry = b""  # the start of a line whose beginning is in an earlier block
+            while pos > floor:
+                size = min(MODEL_BLOCK_BYTES, pos - floor)
+                pos -= size
+                f.seek(pos)
+                chunk = f.read(size) + carry
+                lines = chunk.split(b"\n")
+                # The first piece may be cut: keep it for the next (earlier) block, which
+                # ends with its beginning. At the file's start (or the window's) it stays.
+                carry = lines.pop(0) if pos > floor else b""
+                for raw in reversed(lines):
+                    if needle not in raw:
+                        continue
+                    try:
+                        entry = json.loads(raw.decode("utf-8", errors="replace"))
+                    except ValueError:
+                        continue  # a line still being written
+                    if isinstance(entry, dict):
+                        model = _model_in_entry(entry, agent)
+                        if model:
+                            return model
     except OSError:
         return ""
-    for line in reversed(lines):
-        try:
-            entry = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(entry, dict):
-            continue
-        if agent == "codex":
-            payload = entry.get("payload") or {}
-            model = payload.get("model") or (payload.get("thread_settings") or {}).get("model")
-        else:
-            msg = entry.get("message") or {}
-            model = msg.get("model") if msg.get("role") == "assistant" else None
-        if isinstance(model, str) and model and not model.startswith("<"):  # "<synthetic>" is no model
-            return model
     return ""
+
+
+def active_model(payload: dict, agent: str) -> str:
+    """The model to show for this session: the hook input's, else the transcript's
+    newest, else "" (unknown: never a guess from the agent's config defaults)."""
+    return model_from_hook(payload) or model_from_transcript(str(payload.get("transcript_path") or ""), agent)
 
 
 def response_from_transcript(path_str: str) -> str:

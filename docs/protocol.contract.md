@@ -61,7 +61,7 @@ Merged field by field (`state` frames); the phone renders the session card from 
 | `status` | `running` \| `waiting` (a question is pending) \| `idle` (the agent finished its turn) \| `stopped` |
 | `background_agents` | Claude only: opaque ids of subagents still running, written by the SubagentStart/SubagentStop hooks and cleared on session start, `/restart` and `/stop`. A phone showing an `idle` session with a non-empty list says "Waiting for N background agents to finish". |
 | `agent` | `claude` \| `codex` \| `gemini` \| `grok` \| `cursor` \| `scoot` |
-| `model` | the model the session answers with, when known: scoot's provider/model, or Claude's and Codex's model id read from the transcript after each turn (so a `/model` switch shows after the next turn) |
+| `model` | the model the session answers with, when known: scoot's provider/model, or Claude's and Codex's model id. Since 0.1.11 it comes from the hook input first (Codex names it on every prompt, so it shows as a turn starts and a `/model` switch shows at the next prompt; Claude names it at session start), else from the transcript after each turn. Absent or `""` means unknown; it is never guessed from the agent's config |
 | `project_path` | the folder, encrypted |
 | `last_event_ts`, `last_event_summary` | the card's subtitle and its "last touched" order; the summary is encrypted. `last_event_ts` moves with activity only (a message, a question, a tool-call summary, a notice, a session start or stop), never with a plain status change such as a restart or an idle check |
 | `pending_question_id` | the event id of the open question, or `""` |

@@ -96,7 +96,7 @@ def main() -> int:
                 if agent in ("claude", "codex"):
                     # The phone shows the model next to the agent; the transcript is the
                     # truth after a /model switch, which no hook announces.
-                    model = on_stop_claude.model_from_transcript(str(payload.get("transcript_path") or ""), agent)
+                    model = on_stop_claude.active_model(payload, agent)
                     if model:
                         transport.update_project(model=model)
                 if agent == "claude":
