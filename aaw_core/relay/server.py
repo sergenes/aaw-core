@@ -145,7 +145,8 @@ WS_MAX_SIZE = 1024 * 1024            # largest incoming frame; passed to uvicorn
 HELLO_TIMEOUT_S = 10.0               # a socket must say hello within this or is closed
 SEND_TIMEOUT_S = 5.0                 # a peer that cannot take a frame in this long is dropped
 WS_PING_INTERVAL_S = 20.0            # server pings; a socket that answers none in WS_PING_TIMEOUT_S
-WS_PING_TIMEOUT_S = 20.0             # is closed by uvicorn, so a dead one is reaped within a minute
+WS_PING_TIMEOUT_S = 60.0             # is closed by uvicorn: a dead one is reaped within ~80 s, a
+                                     # starved-but-alive daemon on a loaded Mac is not (seen 2026-10-23)
 HISTORY_MAX_EVENTS = 1000            # hard cap on one history response, whatever the client asks
 HISTORY_MAX_BYTES = 8 * 1024 * 1024  # and on its payload bytes (newest events win)
 FRAMES_PER_MINUTE = 1200             # per-connection budget for incoming frames
