@@ -6,7 +6,8 @@ startup / resume / compact must not touch history the user did not clear.
 
 For scoot it also publishes the model the session resumed with, so the session
 row shows the truth (app- or terminal-started, and after a /model change).
-For Claude and Codex it publishes the model from the resumed transcript, or clears
+For Claude and Codex it publishes the model from the hook input or the resumed
+transcript, or clears
 the field for a fresh session: a folder that ran scoot before kept scoot's model on
 the doc, and the Claude session that replaced it showed "gpt-6-astra" for days.
 """
@@ -19,7 +20,7 @@ import os
 import sys
 
 from aaw_core.hooks.common import open_transport, preamble, read_payload
-from aaw_core.hooks.on_stop_claude import model_from_transcript
+from aaw_core.hooks.on_stop_claude import active_model
 
 
 def scoot_model() -> str:
@@ -50,11 +51,12 @@ def main() -> int:
     payload = read_payload()
     clear = payload.get("source") == "clear"
     model = scoot_model() if agent == "scoot" else ""
-    # The transcript names the model a resumed session answers with; a fresh one has
-    # none yet, and the next turn's Stop hook fills it in.
-    restamp = agent in ("claude", "codex") and payload.get("source") in ("startup", "resume")
+    # The hook input names the model (Codex always, Claude on SessionStart); else the
+    # transcript does for a resumed session. A fresh one with neither gets "" (unknown),
+    # and the first prompt or Stop hook fills it in.
+    restamp = agent in ("claude", "codex") and payload.get("source") in ("startup", "resume", "fork")
     if restamp:
-        model = model_from_transcript(str(payload.get("transcript_path") or ""), agent)
+        model = active_model(payload, agent)
     if not clear and not restamp and not (model and model != "auto"):
         return 0
     transport = open_transport(settings, project)

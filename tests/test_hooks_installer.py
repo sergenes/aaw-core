@@ -44,7 +44,7 @@ def test_claude_settings_merge_preserves_other_keys_and_is_idempotent(home):
     assert data["theme"] == "dark"
     assert [h["hooks"][0]["command"] for h in data["hooks"]["Stop"]] == ["echo mine", hi.hook_command("on_stop")]
     assert data["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"] == hi.PRE_TOOL_TIMEOUT
-    assert data["hooks"]["SessionStart"][0]["matcher"] == "clear"
+    assert "matcher" not in data["hooks"]["SessionStart"][0]  # every source: clear, startup, resume
 
 
 def test_corrupt_settings_are_backed_up_not_clobbered(home, capsys):

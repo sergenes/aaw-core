@@ -147,7 +147,9 @@ def update_claude_hooks() -> Path:
     path = home() / ".claude" / "settings.json"
     settings = _read_json(path)
     hooks = settings.get("hooks") if isinstance(settings.get("hooks"), dict) else {}
-    _claude_shaped(hooks, session_start_matcher="clear")
+    # Every source: "clear" wipes the feed, and startup / resume stamp the session's model
+    # (registered for "clear" alone until 0.1.11, which left that path dead for Claude).
+    _claude_shaped(hooks, session_start_matcher=None)
     # Claude only: the running-subagents set behind "Waiting for N background agents".
     merge_hook(hooks, "SubagentStart", "on_subagent", timeout=10)
     merge_hook(hooks, "SubagentStop", "on_subagent", timeout=10)
@@ -180,6 +182,10 @@ def update_codex_hooks() -> Path:
     merge_hook(hooks, "PreToolUse", "on_pre_tool", matcher="*", timeout=PRE_TOOL_TIMEOUT)
     merge_hook(hooks, "PostToolUse", "on_post_tool", matcher="*", timeout=10)
     merge_hook(hooks, "UserPromptSubmit", "on_user_prompt", timeout=10)
+    # No SessionStart here although Codex has one: Codex trusts each hook by its hash, and a
+    # new one is skipped, with a startup warning to review it in /hooks, until the user does.
+    # The prompt hook's input already names the model, at the session's first prompt.
+    # Never change an entry above either: a changed definition loses its trust the same way.
     root["hooks"] = hooks
     _write_json(path, root)
     # Codex only runs hooks behind its feature flag.
