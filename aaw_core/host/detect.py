@@ -102,22 +102,36 @@ def detect_permission_prompt(content: str) -> dict | None:
 
     box = set("─│╭╮╰╯├┤┬┴┼ ")
     skip_starts = ("✓", "⎿", "↳", "❯", "?", "⠋", "⠙", "⠹")
+    # Walking up from the options, whichever comes first decides. A tool approval has its
+    # tool-call line right above (that line is the question). A menu the user opened
+    # (/model) has their own "❯ /model" line or the last turn's summary first, and an older
+    # tool line above that is history, not this menu's question. Seen 2026-10-23: /model
+    # opened mid-turn became a "permission prompt" titled with the agent's git command.
+    start = max(0, first_idx - 20)
+    menu = False
     question = ""
-    for line in reversed(lines[max(0, first_idx - 20): first_idx]):
-        s = line.strip()
+    for i in range(first_idx - 1, start - 1, -1):
+        s = lines[i].strip()
         if s.startswith("⏺"):  # the tool-call line just before the prompt
             question = re.sub(r"^⏺\s*", "", s).strip()
             break
+        if re.match(r"^❯\s+\S", s) or re.match(r"^✻\s", s):
+            start, menu = i + 1, True
+            break
     if not question:
         question_lines = []
-        for line in lines[max(0, first_idx - 10): first_idx]:
+        for line in lines[max(start, first_idx - 10): first_idx]:
             s = re.sub(r"^[│┃]\s*", "", line.strip()).strip()
             if not s or all(c in box for c in s) or s[0] in skip_starts:
                 continue
-            if re.match(r"^[-\u2013\u2014_.=•\s]+$", s) or s == "..." or (len(s) <= 3 and not s[0].isalnum()):
+            if re.match(r"^[-\u2013\u2014_.=•▔╌\s]+$", s) or s == "..." or (len(s) <= 3 and not s[0].isalnum()):
                 continue
             question_lines.append(s)
-        question = " ".join(question_lines[-2:]) if question_lines else "Claude needs permission"
+        if menu and len(question_lines) > 1 and len(question_lines[0]) <= 40 \
+                and not re.search(r"[.:?!]$", question_lines[0]):
+            question = question_lines[0]  # the menu's own title ("Select model")
+        else:
+            question = " ".join(question_lines[-2:]) if question_lines else "Claude needs permission"
 
     block = "\n".join(lines[max(0, first_idx - 3): last_idx + 2])
     cursor = next((k for k, f in enumerate(found) if f[3]), None)
@@ -127,6 +141,9 @@ def detect_permission_prompt(content: str) -> dict | None:
         "hash": _md5(block),
         "structure": f"opts={len(found)};nums={','.join(str(n) for n in nums)}",
         "cursor": cursor,  # index of the option the ❯ cursor sits on (arrow-key answers)
+        # A menu the user opened, not a tool approval: the phone shows it as a choice and
+        # auto-approve never answers it.
+        "menu": menu,
     }
 
 
