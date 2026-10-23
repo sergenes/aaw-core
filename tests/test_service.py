@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import plistlib
+import subprocess
 from pathlib import Path
 
 from aaw_core.host import service
@@ -66,3 +67,27 @@ def test_linger_off_reads_loginctl(monkeypatch):
     for answer, off in (("Linger=no\n", True), ("Linger=yes\n", False)):
         monkeypatch.setattr(service, "_run", lambda args, a=answer: subprocess.CompletedProcess(args, 0, stdout=a))
         assert service.linger_off() is off
+
+
+def test_linux_install_restarts_a_running_supervisor(monkeypatch, tmp_path):
+    """Review R10 (2026-10-23): `enable --now` leaves an already running unit alone, so an
+    upgrade reinstalled the unit while the old supervisor kept running the previous code.
+    The installer enables, then restarts (which also starts a stopped one)."""
+    calls: list[list[str]] = []
+
+    def fake_run(args):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(service, "is_macos", lambda: False)
+    monkeypatch.setattr(service, "unit_path", lambda: tmp_path / "aaw-supervisor.service")
+    monkeypatch.setattr(service.shutil, "which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr(service, "_run", fake_run)
+    monkeypatch.setenv("AAW_STATE_DIR", str(tmp_path))
+    from aaw_core.config import load_settings
+    out = service.install(load_settings())
+    systemctl = [c[2:] for c in calls if c[:2] == ["systemctl", "--user"]]
+    assert systemctl[:3] == [["show-environment"], ["daemon-reload"], ["enable", service.SYSTEMD_UNIT]]
+    assert ["restart", service.SYSTEMD_UNIT] in systemctl
+    assert all("--now" not in c for c in systemctl)
+    assert any("(re)started" in line for line in out)

@@ -97,6 +97,7 @@ class RelayTransport:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        self._unsent: dict | None = None  # a frame taken off the queue that the socket refused
         self._ws = None  # the live socket, for stop() to close from another thread
         self.connected = threading.Event()
 
@@ -176,12 +177,17 @@ class RelayTransport:
 
     async def _session(self, ws) -> None:
         async def sender():
+            # A frame the socket refused is kept and goes out first on the next socket. It
+            # used to be dropped (task_done ran in a finally), so an event could vanish from
+            # the feed and a consumed-mark could fail to reach the relay, which then replayed
+            # the command. task_done() runs only once the frame has really gone out, so
+            # flush() keeps meaning "handed to the relay".
             while True:
-                frame = await self._queue.get()
-                try:
-                    await ws.send(json.dumps(frame))
-                finally:
-                    self._queue.task_done()  # lets flush() know the queue drained
+                frame = self._unsent if self._unsent is not None else await self._queue.get()
+                self._unsent = frame
+                await ws.send(json.dumps(frame))
+                self._unsent = None
+                self._queue.task_done()
 
         async def receiver():
             async for raw in ws:
@@ -189,11 +195,17 @@ class RelayTransport:
 
         self._ws = ws
         send_task = asyncio.create_task(sender())
+        recv_task = asyncio.create_task(receiver())
         try:
-            await receiver()
+            # Whichever side fails ends the session and the loop reconnects: a failed
+            # sender used to sit unnoticed while the receiver kept waiting.
+            done, _ = await asyncio.wait({send_task, recv_task}, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                task.result()
         finally:
             self._ws = None
             send_task.cancel()
+            recv_task.cancel()
 
     # ── frames ────────────────────────────────────────────────────────────────
 

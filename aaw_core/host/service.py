@@ -129,11 +129,17 @@ def install(settings: Settings) -> list[str]:
     path.write_text(render_systemd_unit(exe, env))
     out.append(f"wrote {path}")
     _run(["systemctl", "--user", "daemon-reload"])
-    r = _run(["systemctl", "--user", "enable", "--now", SYSTEMD_UNIT])
+    r = _run(["systemctl", "--user", "enable", SYSTEMD_UNIT])
+    # restart, not `enable --now`: an upgrade reinstalls the unit while the old supervisor
+    # may still be running the previous code, and --now leaves a running unit alone. A
+    # restart also starts a stopped one, and the supervisor refreshes every live
+    # session's daemon on start.
+    if r.returncode == 0:
+        r = _run(["systemctl", "--user", "restart", SYSTEMD_UNIT])
     if r.returncode != 0:
-        out.append(f"systemctl enable failed: {(r.stderr or r.stdout).strip()}")
+        out.append(f"systemctl enable/restart failed: {(r.stderr or r.stdout).strip()}")
     else:
-        out.append(f"supervisor service started (systemd --user); status: systemctl --user status {SYSTEMD_UNIT}")
+        out.append(f"supervisor service (re)started (systemd --user); status: systemctl --user status {SYSTEMD_UNIT}")
         if linger_off():
             out.append("note: it stops when you log out (lingering is off for your user). To keep it running "
                        "on a server: sudo loginctl enable-linger $USER")
