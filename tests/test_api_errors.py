@@ -173,7 +173,7 @@ def test_an_expired_login_pushes_once_per_session(settings):
     for prompt in ("Hey", "Hey"):
         daemon.watch_for_refusal(t, settings, "claude", pane, {"text": prompt, "ts": time.monotonic()})
     assert len(t.notifications) == 1 and "/login" in t.notifications[0][1]
-    assert any(kind == "message" for kind, _ in t.events)  # the second one is still in the feed
+    assert [kind for kind, _ in t.events] == ["message", "message"]  # both prompts show their fate in the feed
 
 
 # ── the error families ─────────────────────────────────────────────────────────

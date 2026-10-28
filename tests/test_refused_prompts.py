@@ -71,6 +71,9 @@ class _Transport:
     def write_notification(self, message, level):
         self.notifications.append((level, message))
 
+    def write_event(self, kind, payload, via=None):
+        pass
+
 
 def _settings():
     return Settings(state_dir=Path(tempfile.mkdtemp()), relay_url=None, computer_name="box", keep_awake=False)

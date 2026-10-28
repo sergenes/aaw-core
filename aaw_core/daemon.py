@@ -177,9 +177,11 @@ def watch_for_refusal(transport: RelayTransport, settings: Settings, agent: str,
     log(f"prompt refused without a turn ({kind or 'other'}): {refusal[:80]!r}")
     marker = on_stop_claude.auth_alert_file(settings, transport.project_id) if kind == "auth" else None
     try:
+        # Every refused prompt shows its fate in the feed; the push for an expired login
+        # goes once per session (the same rule as on_stop_failure).
+        transport.write_event("message", {"role": "assistant", "content": message, "agent": agent})
         if marker is not None and marker.exists():
             log("expired login already reported for this session; not pushing again")
-            transport.write_event("message", {"role": "assistant", "content": message, "agent": agent})
             return
         transport.write_notification(message, level="error")
         if marker is not None:
@@ -368,6 +370,8 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
         if not is_reconnect:
             transport.clear_events()
             update_subagents(settings, project_id, clear=True)
+            # A new session's expired login is news again (one push per session).
+            on_stop_claude.auth_alert_file(settings, project_id).unlink(missing_ok=True)
             # The summary too: a folder that ran Claude before would otherwise show
             # "Claude is waiting for your input" on its new Gemini or Scoot session for
             # as long as it lives (those agents never write a summary of their own).
@@ -561,6 +565,9 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
                         transport.set_project_status("running", pending_question_id="")
                         log(f"earlier card {replaced[:8]} cleared (its menu was replaced)")
                 elif perm and perm["hash"] == perm_hash:
+                    # A menu's hash ignores its cursor, so follow the cursor here: an answer
+                    # past option 9 walks there with arrow keys from where it was last seen.
+                    perm_cursor = perm.get("cursor")
                     if time.monotonic() - perm_first_seen >= 5.0 and not perm_menu and auto_approve() \
                             and detect.is_yes_no_shaped(perm_options):
                         tmux.send_keys(session, "1")  # the earlier key may have been dropped
