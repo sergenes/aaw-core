@@ -435,15 +435,18 @@ class Supervisor:
         return [{**head, "part": i, "chunks": [c]} for i, c in enumerate(chunks)]
 
     def req_fs_attach(self, payload: dict) -> dict:
-        """Save an image the phone attached to a prompt and return its local path. This is
-        the file-download channel in reverse: the phone sends encrypted base64 chunks
-        (a downscaled JPEG), we decrypt each, write the image under the attachments dir, and
+        """Save a file the phone attached to a prompt and return its local path. This is
+        the file-download channel in reverse: the phone sends encrypted base64 chunks (a
+        downscaled photo in one request, or any allowed file one part per request, see
+        _fs_attach_part), we decrypt each, write the file under the attachments dir, and
         hand back the path (encrypted) for the phone to reference in the prompt it then
         sends. Nothing is stored on the relay: the request is routed live, not persisted."""
         if not self.enc_key:
             return {"error": fs.ERR_DENIED}
         chunks_enc = payload.get("chunks") or []
         suffix = payload.get("suffix") or ".jpg"
+        if payload.get("upload_id"):
+            return self._fs_attach_part(payload, chunks_enc, suffix)
         chunks = [self.decrypt(c) for c in chunks_enc]
         # decrypt() returns "" for a chunk it cannot read (a wrong/re-paired key). If we were
         # given chunks but none decrypted, the upload is undecryptable here: deny it rather
@@ -454,6 +457,27 @@ class Supervisor:
         if res["error"]:
             return {"error": res["error"]}
         return {"path_enc": self.encrypt(res["path"]), "size": res["size"], "error": ""}
+
+    def _fs_attach_part(self, payload: dict, chunks_enc: list, suffix: str) -> dict:
+        """One part of a file sent in parts (``upload_id``, 0-based ``part``,
+        ``total_parts``, one encrypted chunk), for a file past the relay's 1 MiB frame cap.
+        Each reply names the part it ``received``; the reply to the part that completes the
+        file also carries ``path_enc``."""
+        if len(chunks_enc) != 1:
+            return {"error": fs.ERR_DENIED, "received": -1}
+        chunk = self.decrypt(chunks_enc[0])
+        if not chunk:
+            return {"error": fs.ERR_DENIED, "received": -1}  # a key this computer cannot read
+        res = fs.save_attachment_part(str(payload.get("upload_id")), payload.get("part"),
+                                      payload.get("total_parts"), chunk, suffix,
+                                      str(self.settings.attachments_dir))
+        if res["error"]:
+            return {"error": res["error"], "received": -1}
+        out = {"received": res["received"], "size": res["size"], "error": ""}
+        if res["path"]:
+            out["path_enc"] = self.encrypt(res["path"])
+            self.log(f"attachment received in {payload.get('total_parts')} parts ({res['size']} bytes)")
+        return out
 
     # ── main loop ─────────────────────────────────────────────────────────────
 

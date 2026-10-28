@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import base64
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -34,13 +36,31 @@ MAX_PREVIEW_SOURCE_BYTES = 64 * 1024 * 1024  # never read more than this to rend
 PREVIEW_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".heic"}  # not .gif: it may animate
 RAW_CHUNK = 384 * 1024  # base64 (x1.33) then encrypted and base64 again stays under one 1 MiB frame
 
-# An attached image the phone uploads (downscaled to a JPEG before it is sent). The cap is
-# generous for a photo while bounding what one request can write; the phone sends far less.
+# A file the phone attaches to a prompt. In one request frame (the phones up to 2.11, a
+# downscaled photo) the relay's 1 MiB frame cap is the real limit and this cap only bounds
+# what one request can write. In parts (since 0.1.12, one frame per RAW_CHUNK slice) the
+# file can be larger: MAX_ATTACH_PARTS_BYTES is about a minute of phone video.
 MAX_ATTACH_BYTES = 12 * 1024 * 1024
-ATTACH_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic"}
-# Attachments older than this are swept on each new upload: a prompt uses its image at once,
+MAX_ATTACH_PARTS_BYTES = 50 * 1024 * 1024
+MAX_ATTACH_PARTS = -(-MAX_ATTACH_PARTS_BYTES // RAW_CHUNK)  # ceil: the most parts an upload may declare
+ATTACH_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic"}
+# Files an agent can open from a path: images, documents, short videos, and text and source
+# files. No archives or binaries. No .svg: the phones treat the image extensions as photos
+# (downscale, preview), and .svg is neither a photo nor on the download channel's list.
+ATTACH_SUFFIXES = ATTACH_IMAGE_SUFFIXES | {
+    ".pdf", ".mov", ".mp4", ".m4v",
+    ".txt", ".md", ".csv", ".tsv", ".json", ".log", ".yaml", ".yml", ".toml", ".xml", ".html", ".css", ".sql",
+    ".py", ".js", ".jsx", ".ts", ".tsx", ".swift", ".kt", ".kts", ".java", ".go", ".rs", ".rb", ".php",
+    ".c", ".h", ".cc", ".cpp", ".hpp", ".m", ".mm", ".cs", ".sh", ".zsh", ".gradle",
+}
+# Attachments older than this are swept on each new upload: a prompt uses its file at once,
 # so nothing needs to linger, and the folder never grows without bound.
 ATTACH_TTL_S = 24 * 60 * 60
+# An upload in parts that has not completed in this long was abandoned (the phone gave up,
+# or lost its connection): its staged parts are removed on the next upload.
+ATTACH_PARTS_TTL_S = 60 * 60
+ATTACH_PARTS_DIR = ".parts"  # under the attachments dir: one folder per upload in progress
+_UPLOAD_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
 # extension -> mime. The transfer is binary-safe (base64 slices), so an image needs
 # only its entry here; the phone renders by mime.
@@ -224,12 +244,12 @@ def fetch_file(path: str, roots: list[str] | tuple[str, ...] | None = None,
 
 
 def save_attachment(chunks_b64: list[str], suffix: str, dest_dir: str) -> dict:
-    """Write an image the phone uploaded and return its local path::
+    """Write a file the phone uploaded in one request and return its local path::
 
         {path, size, error}
 
     ``chunks_b64`` are the base64 raw slices (the download path in reverse; the supervisor
-    has already decrypted each). The suffix is checked against an image allowlist and the
+    has already decrypted each). The suffix is checked against the attachment allowlist and the
     joined size against MAX_ATTACH_BYTES. Stale attachments are swept first so the folder
     never grows without bound. The write is ours, not a user path, so there is no root fence,
     but the name is random and the suffix sanitized so the request cannot choose the path.
@@ -258,23 +278,120 @@ def save_attachment(chunks_b64: list[str], suffix: str, dest_dir: str) -> dict:
     return {"path": target, "size": len(data), "error": ""}
 
 
-def _sweep_old_attachments(dest_dir: str) -> None:
-    import time
-    cutoff = time.time() - ATTACH_TTL_S
+def save_attachment_part(upload_id: str, part: int, total: int, chunk_b64: str, suffix: str,
+                         dest_dir: str) -> dict:
+    """Stage one part of a file the phone uploads in parts, and assemble the file once every
+    part is in::
+
+        {received, path, size, error}
+
+    The relay caps a frame at 1 MiB, so a file larger than a photo travels as one request per
+    RAW_CHUNK slice, each naming its ``upload_id``, 0-based ``part`` and ``total`` part count
+    (the download channel's ``parts`` in reverse). Each part is written to
+    ``<dest>/.parts/<upload_id>/<part>`` and acknowledged with ``received`` = its index, so
+    the phone sends the next one, or resends a part whose reply it never got (a resend just
+    overwrites it). When the last missing part lands, the file is joined in order under a
+    random name and ``path`` is set; until then ``path`` is "". Every part repeats the same
+    ``total`` and suffix; an upload that changes either, or grows past
+    MAX_ATTACH_PARTS_BYTES, is refused and its parts removed.
+    """
+    ext = ("." + str(suffix).lstrip(".")).lower()
+    if ext not in ATTACH_SUFFIXES:
+        return _part_err(ERR_UNSUPPORTED)
+    if not _UPLOAD_ID.match(str(upload_id)):
+        return _part_err(ERR_DENIED)
     try:
-        entries = os.scandir(dest_dir)
+        part, total = int(part), int(total)
+    except (TypeError, ValueError):
+        return _part_err(ERR_DENIED)
+    if not (1 <= total <= MAX_ATTACH_PARTS and 0 <= part < total):
+        return _part_err(ERR_TOO_LARGE if total > MAX_ATTACH_PARTS else ERR_DENIED)
+    try:
+        data = base64.b64decode(chunk_b64 or "", validate=True)
+    except (ValueError, TypeError):
+        return _part_err(ERR_DENIED)
+    if not data:
+        return _part_err(ERR_NOT_A_FILE)
+    if len(data) > RAW_CHUNK:
+        return _part_err(ERR_TOO_LARGE)  # one part is one slice: bounds what a request can write
+    staging = os.path.join(dest_dir, ATTACH_PARTS_DIR, upload_id)
+    meta_path = os.path.join(staging, "meta")
+    meta = f"{total} {ext}"
+    target = ""
+    try:
+        if part == 0 or not os.path.exists(meta_path):
+            # Before the folder is made: a stale folder under this id (an upload resumed
+            # after ATTACH_PARTS_TTL_S) is wiped here and starts over, not wiped under us.
+            _sweep_old_attachments(dest_dir)
+        os.makedirs(staging, mode=0o700, exist_ok=True)
+        if os.path.exists(meta_path):
+            with open(meta_path) as f:
+                if f.read().strip() != meta:
+                    shutil.rmtree(staging, ignore_errors=True)
+                    return _part_err(ERR_DENIED)
+        else:
+            with open(meta_path, "w") as f:
+                f.write(meta)
+        with open(os.path.join(staging, str(part)), "wb") as f:
+            f.write(data)
+        have = [n for n in os.listdir(staging) if n.isdigit()]
+        staged = sum(os.path.getsize(os.path.join(staging, n)) for n in have)
+        if staged > MAX_ATTACH_PARTS_BYTES:
+            shutil.rmtree(staging, ignore_errors=True)
+            return _part_err(ERR_TOO_LARGE)
+        if len(have) < total:
+            return {"received": part, "path": "", "size": staged, "error": ""}
+        name = base64.urlsafe_b64encode(os.urandom(12)).decode().rstrip("=") + ext
+        target = os.path.join(dest_dir, name)
+        with open(target, "wb") as out:
+            os.chmod(target, 0o600)
+            for i in range(total):
+                with open(os.path.join(staging, str(i)), "rb") as f:
+                    shutil.copyfileobj(f, out)
+        shutil.rmtree(staging, ignore_errors=True)
+    except OSError:
+        if target:  # a join that failed midway (disk full) leaves no half-written file behind
+            try:
+                os.remove(target)
+            except OSError:
+                pass
+        return _part_err(ERR_DENIED)
+    return {"received": part, "path": target, "size": staged, "error": ""}
+
+
+def _sweep_old_attachments(dest_dir: str) -> None:
+    """Remove attachments past ATTACH_TTL_S and uploads in parts abandoned for
+    ATTACH_PARTS_TTL_S (by the time their last part was written)."""
+    import time
+    now = time.time()
+    try:
+        entries = list(os.scandir(dest_dir))
     except OSError:
         return
     for e in entries:
         try:
-            if e.is_file() and e.stat().st_mtime < cutoff:
+            if e.is_file() and e.stat().st_mtime < now - ATTACH_TTL_S:
                 os.remove(e.path)
+        except OSError:
+            pass
+    try:
+        uploads = list(os.scandir(os.path.join(dest_dir, ATTACH_PARTS_DIR)))
+    except OSError:
+        return
+    for u in uploads:
+        try:
+            if u.is_dir(follow_symlinks=False) and u.stat().st_mtime < now - ATTACH_PARTS_TTL_S:
+                shutil.rmtree(u.path, ignore_errors=True)
         except OSError:
             pass
 
 
 def _attach_err(kind: str) -> dict:
     return {"path": "", "size": 0, "error": kind}
+
+
+def _part_err(kind: str) -> dict:
+    return {"received": -1, "path": "", "size": 0, "error": kind}
 
 
 def _dir_err(kind: str) -> dict:
