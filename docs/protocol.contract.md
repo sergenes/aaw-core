@@ -28,7 +28,7 @@ One document per feed item:
 | type | payload | encrypted fields |
 | --- | --- | --- |
 | `message` | `role` (`user` \| `assistant`), `content`, `agent`, and `command_id` on the daemon's echo of a prompt from the phone (the command it delivered, since 0.1.9), so the phone matches its own prompt by id | `content` |
-| `question` | `question`, `context`, `options_enc` (each option encrypted; since 0.1.9 the plaintext `options` list is not sent, every relay-era app reads `options_enc`), `kind` (`permission` \| `choice` \| `ask_user` \| `multiselect` \| ...; a pane menu the user opened, such as Claude Code's `/model`, is a `choice` titled by its own header since 0.1.10), `timeout_at`, `agent`, and kind-specific extras | `question`, `context`, each of `options_enc` |
+| `question` | `question`, `context`, `options_enc` (each option encrypted; since 0.1.9 the plaintext `options` list is not sent, every relay-era app reads `options_enc`), `kind` (`permission` \| `choice` \| `ask_user` \| `multiselect` \| ...; a pane menu the user opened, such as Claude Code's `/model`, is a `choice` titled by its own header since 0.1.10, and since 0.1.12 its options are one line each, the menu's padded columns joined with " · " ("Fable 5.1 · For your toughest challenges"), which is also the answer text echoed to the feed), `timeout_at`, `agent`, and kind-specific extras | `question`, `context`, each of `options_enc` |
 | `notification` | `message`, `level` (`info` \| `success` \| `warning` \| `error`) | `message` |
 | `reminder` | `reset_at` (epoch s), `reset_label`, agent details | none |
 

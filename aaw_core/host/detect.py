@@ -135,6 +135,14 @@ def detect_permission_prompt(content: str) -> dict | None:
 
     block = "\n".join(lines[max(0, first_idx - 3): last_idx + 2])
     cursor = next((k for k, f in enumerate(found) if f[3]), None)
+    if menu:
+        # A menu pads its columns ("Fable 5.1              For your toughest challenges"),
+        # and the padding shifts as the ❯ cursor moves. The phone shows each option as one
+        # line and echoes the pick into the feed, so the columns become " · ", and the hash
+        # ignores the cursor: moving it on the computer is not a new menu (seen 2026-10-28:
+        # two cards for one /model menu half a second apart).
+        option_texts = [re.sub(r"\s{2,}", " · ", t) for t in option_texts]
+        block = question + "\n" + "\n".join(option_texts)
     return {
         "question": question,
         "options": option_texts,
@@ -415,15 +423,41 @@ def detect_cursor_error(pane: str) -> str:
     return m.group(1).strip()
 
 
+_RETRY_BANNER = re.compile(r"^(?:[^\w\s(]\s*)?(?P<desc>[^·]+?)\s*·\s*Retrying in\s+\d+\s*s\s*·\s*attempt\s+"
+                           r"(?P<attempt>\d+)\s*/\s*(?P<total>\d+)\s*$")
+
+
+def _composer_top(lines: list[str]) -> int | None:
+    """Index of the full-width rule right above Claude's input line (the last ❯ line
+    under a rule), or None when no input box is on screen."""
+    for i in range(len(lines) - 1, -1, -1):
+        if not lines[i].strip().startswith("❯"):
+            continue
+        for j in range(i - 1, -1, -1):
+            prev = lines[j].strip()
+            if prev:
+                return j if set(prev) <= {"─"} else None
+    return None
+
+
 def detect_claude_retry(pane: str) -> dict | None:
     """Claude Code's in-progress API retry banner ("<error> · Retrying in 10s · attempt
     6/10"). The turn never ends while retrying, so no Stop hook fires; this is the only
-    signal. Matches the structure, not a specific error. Returns {message, attempt, total}."""
-    m = re.search(r"(?P<desc>[^\n·]+?)\s*·\s*Retrying in\s+\d+\s*s\s*·\s*attempt\s+(?P<attempt>\d+)\s*/\s*(?P<total>\d+)",
-                  pane)
+    signal. Returns {message, attempt, total}.
+
+    Only Claude's own status line counts: the last line above the input box, starting
+    with its spinner glyph. The same words anywhere else are a tool's output (seen
+    2026-10-26: a session that printed another session's pane sent that banner, with
+    the other pane's name in front, to the phone as its own retry)."""
+    lines = pane.split("\n")
+    top = _composer_top(lines)
+    if top is None:
+        return None
+    status = next((ln.strip() for ln in reversed(lines[:top]) if ln.strip()), "")
+    m = _RETRY_BANNER.match(status)
     if not m:
         return None
-    desc = re.sub(r"^[^\w(]+", "", m.group("desc").strip()).strip()  # drop the animating spinner glyph
+    desc = m.group("desc").strip()
     if not desc:
         return None
     return {"message": desc, "attempt": int(m.group("attempt")), "total": int(m.group("total"))}
@@ -489,10 +523,17 @@ def last_logged_assistant_message(log_path: Path) -> str:
     return last
 
 
+# What Claude shows in an empty input box after Enter while a turn is still busy (an API
+# retry, a long tool call): the prompt is queued and runs when the turn frees up.
+CLAUDE_QUEUED_PLACEHOLDER = "Press up to edit queued messages"
+
+
 def pane_input_is_empty(pane: str) -> bool | None:
     """Claude Code only: True when the input box (the ❯ line directly under a full-width
     separator) is empty, False when it holds text, None when no input box is visible.
-    The separator check keeps an AskUserQuestion's "❯ 1. Red" from reading as typed text."""
+    The separator check keeps an AskUserQuestion's "❯ 1. Red" from reading as typed text.
+    The queued-prompt placeholder counts as empty: the prompt was taken (seen 2026-10-26:
+    every phone prompt during an API retry was reported as not delivered, then ran)."""
     lines = pane.splitlines()
     for i in range(len(lines) - 1, -1, -1):
         stripped = lines[i].strip()
@@ -504,7 +545,7 @@ def pane_input_is_empty(pane: str) -> bool | None:
                 prev = lines[j].strip()
                 break
         if prev and set(prev) <= {"─"}:
-            return stripped[1:].strip() == ""
+            return stripped[1:].strip() in ("", CLAUDE_QUEUED_PLACEHOLDER)
     return None
 
 

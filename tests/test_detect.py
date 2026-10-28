@@ -268,7 +268,7 @@ def test_scrolling_menus_count_their_edge_rows():
     one option to the detector, so no menu: /model from the phone showed nothing."""
     perm = detect.detect_permission_prompt(MODEL_PICKER_PANE)
     assert perm is not None
-    assert [o.split("  ")[0] for o in perm["options"]] == ["Default (recommended)", "Opus"]
+    assert [o.split(" · ")[0] for o in perm["options"]] == ["Default (recommended)", "Opus"]
     assert "✔" not in perm["options"][0]  # the current-choice mark is not part of the name
     assert perm["cursor"] == 0
     assert perm["question"] == "Select model"  # the menu's own title, the card's text
@@ -345,7 +345,8 @@ def test_cursor_error_prefers_chat_message():
 
 
 def test_claude_retry_banner():
-    retry = detect.detect_claude_retry("✻ Connection dropped (ECONNRESET) · Retrying in 10s · attempt 6/10")
+    retry = detect.detect_claude_retry("✻ Connection dropped (ECONNRESET) · Retrying in 10s · attempt 6/10\n"
+                                       "──────────\n❯ \n──────────\n")
     assert retry == {"message": "Connection dropped (ECONNRESET)", "attempt": 6, "total": 10}
     assert detect.detect_claude_retry("Retrying later") is None
     assert detect.CLAUDE_RETRY_ALERT_ATTEMPT == 3

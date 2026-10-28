@@ -145,11 +145,17 @@ def flush_pending_message(transport: RelayTransport, session: str, agent: str) -
 REFUSAL_WINDOW_S = 25.0
 
 
-def watch_for_refusal(transport: RelayTransport, agent: str, pane: str, turn_watch: dict) -> None:
+def watch_for_refusal(transport: RelayTransport, settings: Settings, agent: str, pane: str,
+                      turn_watch: dict) -> None:
     """Report a prompt the agent refused without starting a turn (out of usage credits,
     login expired): the error block under the prompt's echo goes to the phone as an
     error notification, with the friendly wording for the families we know."""
     if agent != "claude" or not turn_watch.get("text"):
+        return
+    if turn_watch["text"].lstrip().startswith("/"):
+        # A slash command prints its result in the same ⎿ block a refusal uses ("Set model
+        # to Fable 5.1 and saved as your default", "17 skills available"): never an error.
+        turn_watch.clear()
         return
     if time.monotonic() - turn_watch.get("ts", 0) > REFUSAL_WINDOW_S:
         turn_watch.clear()
@@ -162,10 +168,25 @@ def watch_for_refusal(transport: RelayTransport, agent: str, pane: str, turn_wat
         return
     turn_watch.clear()
     kind = on_stop_claude.api_error_kind_from_text(refusal)
+    if not kind and "error" not in refusal.lower():
+        # Only the error families alert; anything else under a prompt is output, not a
+        # refusal (an unknown text is logged so a new family can be added from real panes).
+        log(f"text under the prompt is not a known refusal; not alerting: {refusal[:80]!r}")
+        return
     message = on_stop_claude.friendly_api_error_message(kind, refusal) if kind else refusal
     log(f"prompt refused without a turn ({kind or 'other'}): {refusal[:80]!r}")
+    marker = on_stop_claude.auth_alert_file(settings, transport.project_id) if kind == "auth" else None
     try:
+        # Every refused prompt shows its fate in the feed; the push for an expired login
+        # goes once per session (the same rule as on_stop_failure).
+        transport.write_event("message", {"role": "assistant", "content": message, "agent": agent})
+        if marker is not None and marker.exists():
+            log("expired login already reported for this session; not pushing again")
+            return
         transport.write_notification(message, level="error")
+        if marker is not None:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
     except Exception as e:  # noqa: BLE001
         log(f"could not report the refused prompt: {e}", err=True)
 
@@ -349,6 +370,8 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
         if not is_reconnect:
             transport.clear_events()
             update_subagents(settings, project_id, clear=True)
+            # A new session's expired login is news again (one push per session).
+            on_stop_claude.auth_alert_file(settings, project_id).unlink(missing_ok=True)
             # The summary too: a folder that ran Claude before would otherwise show
             # "Claude is waiting for your input" on its new Gemini or Scoot session for
             # as long as it lives (those agents never write a summary of their own).
@@ -497,7 +520,7 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
 
             if alive:
                 pane = tmux.visible_pane(session)
-                watch_for_refusal(transport, agent, pane, turn_watch)
+                watch_for_refusal(transport, settings, agent, pane, turn_watch)
 
                 # ── Claude Code "trust this folder" dialog ─────────────────
                 trust = detect.detect_claude_trust_dialog(pane) if agent == "claude" else None
@@ -542,6 +565,9 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
                         transport.set_project_status("running", pending_question_id="")
                         log(f"earlier card {replaced[:8]} cleared (its menu was replaced)")
                 elif perm and perm["hash"] == perm_hash:
+                    # A menu's hash ignores its cursor, so follow the cursor here: an answer
+                    # past option 9 walks there with arrow keys from where it was last seen.
+                    perm_cursor = perm.get("cursor")
                     if time.monotonic() - perm_first_seen >= 5.0 and not perm_menu and auto_approve() \
                             and detect.is_yes_no_shaped(perm_options):
                         tmux.send_keys(session, "1")  # the earlier key may have been dropped

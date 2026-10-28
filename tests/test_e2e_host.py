@@ -10,7 +10,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import tempfile
+import time
 
 import pytest
 from test_relay import _phone_connect, _poll_until, _recv_until, live_relay  # noqa: F401 (fixture)
@@ -249,6 +251,104 @@ def test_a_menu_replaced_by_an_auto_approved_prompt_leaves_no_card(host):
         assert _poll_until(lambda: "you said: 1" in tmux.visible_pane(session), timeout=30)
         assert _poll_until(lambda: not (reader.list_projects().get(SESSION_ID) or {}).get("pending_question_id"),
                            timeout=15)
+        phone.close()
+    finally:
+        reader.stop(flush_timeout=0)
+
+
+# Claude Code 2.1.312 during an API retry: Enter queues the prompt and the input box shows
+# a placeholder until the turn frees up (captured 2026-10-28 against a dead API address).
+RETRY_QUEUE_AGENT = r"""#!/usr/bin/env bash
+RULE=$(printf '─%.0s' $(seq 1 60))
+echo "fake claude ready"
+printf '\033[2J\033[H❯ say hi\n✻ Unable to connect to API (EPROTO) · Retrying in 9s · attempt 3/10\n%s\n❯ \n%s\n' "$RULE" "$RULE"
+read -r line
+printf '\033[2J\033[H❯ say hi\n❯ %s\n  ctrl+x ctrl+s to send now\n' "$line"
+printf '✻ Unable to connect to API (EPROTO) · Retrying in 8s · attempt 3/10\n%s\n❯ Press up to edit queued messages\n%s\n' "$RULE" "$RULE"
+while IFS= read -r more; do :; done
+"""
+
+
+def test_a_prompt_sent_during_an_api_retry_is_delivered_not_reported_lost(host):
+    """2026-10-26: Claude was retrying its API, every phone prompt was queued by Claude
+    and later ran, yet each one also got "Your message did not reach the session": the
+    daemon read the queued-prompt placeholder as text left in the input box. A queued
+    prompt is delivered: echoed to the feed once, and no undelivered notice."""
+    settings, ident, key, project, relay_url = host
+    with open(shutil.which("claude"), "w") as f:
+        f.write(RETRY_QUEUE_AGENT)
+    sessions.start_session(settings, project, SESSION_ID, "claude")
+    session = tmux_session(SESSION_ID)
+    assert _poll_until(lambda: "Retrying in 9s" in tmux.visible_pane(session), timeout=15)
+
+    reader = RelayTransport(relay_url=relay_url, token=ident.token, computer_id=ident.computer_id,
+                            project_id="_test", sessions_dir=settings.sessions_dir, enc_key=key).start()
+    try:
+        assert reader.wait_connected(10)
+        assert _poll_until(lambda: (reader.list_projects().get(SESSION_ID) or {}).get("status")
+                           in ("running", "idle"), timeout=30)
+        phone = _phone_connect(relay_url, reader.register_phone_token())
+        phone.send(json.dumps({"type": "subscribe", "project_id": SESSION_ID}))
+        cmd = make_command("Status", key, source="phone")
+        phone.send(json.dumps({"type": "command", "project_id": SESSION_ID, "command": cmd}))
+        assert _poll_until(lambda: "Press up to edit queued messages" in tmux.visible_pane(session), timeout=30)
+        ev = _recv_until(phone, lambda f: f.get("type") == "event" and f["event"]["type"] == "message"
+                         and f["event"]["payload"].get("role") == "user", timeout=30)
+        assert decrypt(ev["event"]["payload"]["content"], key) == "Status"
+        # the old code re-sent Enter five times (about 8 s) before reporting it lost
+        time.sleep(10)
+        local = (settings.sessions_dir / f"{SESSION_ID}.jsonl").read_text()
+        assert "did not reach" not in local
+        assert '"content": "Status"' in local
+        phone.close()
+    finally:
+        reader.stop(flush_timeout=0)
+
+
+# Claude Code 2.1.312 with an expired login: the turn ends at once with a ⏺ reply, and
+# Claude runs its StopFailure hook (not Stop) with the error named in the payload.
+STOP_FAILURE_AGENT = r"""#!/usr/bin/env bash
+echo "fake claude ready"
+while IFS= read -r line; do
+  printf '❯ %s\n⏺ Please run /login · API Error: 401 Invalid bearer token\n' "$line"
+  printf '{"hook_event_name": "StopFailure", "error": "authentication_failed", "last_assistant_message": "Please run /login · API Error: 401 Invalid bearer token"}' \
+    | "__PYTHON__" -m aaw_core.hooks.on_stop_failure
+done
+"""
+
+
+def test_a_turn_that_dies_on_an_expired_login_tells_the_phone_once(host):
+    """2026-10-26: Claude's login expired and every phone prompt got "Login expired ·
+    Please run /login" in the pane while the phone heard nothing, because Claude reports
+    an API error through StopFailure, which nothing listened to. The phone must get one
+    push saying to sign in again, and each failed prompt still shows in the feed."""
+    settings, ident, key, project, relay_url = host
+    with open(shutil.which("claude"), "w") as f:
+        f.write(STOP_FAILURE_AGENT.replace("__PYTHON__", sys.executable))
+    sessions.start_session(settings, project, SESSION_ID, "claude")
+    session = tmux_session(SESSION_ID)
+    assert _poll_until(lambda: "fake claude ready" in tmux.visible_pane(session), timeout=15)
+
+    reader = RelayTransport(relay_url=relay_url, token=ident.token, computer_id=ident.computer_id,
+                            project_id="_test", sessions_dir=settings.sessions_dir, enc_key=key).start()
+    try:
+        assert reader.wait_connected(10)
+        assert _poll_until(lambda: (reader.list_projects().get(SESSION_ID) or {}).get("status")
+                           in ("running", "idle"), timeout=30)
+        phone = _phone_connect(relay_url, reader.register_phone_token())
+        phone.send(json.dumps({"type": "subscribe", "project_id": SESSION_ID}))
+        for n, text in enumerate(("Hey", "Status"), start=1):
+            cmd = make_command(text, key, source="phone")
+            phone.send(json.dumps({"type": "command", "project_id": SESSION_ID, "command": cmd}))
+            assert _poll_until(lambda n=n: tmux.visible_pane(session).count("401 Invalid bearer token") == n,
+                               timeout=30)
+        log = settings.sessions_dir / f"{SESSION_ID}.jsonl"
+        assert _poll_until(lambda: log.read_text().count("sign back in") >= 3, timeout=30)
+        events = [json.loads(ln) for ln in log.read_text().splitlines()]
+        pushes = [e for e in events if e["type"] == "notification" and "sign back in" in e["message"]]
+        feed = [e for e in events if e["type"] == "message" and "sign back in" in e.get("content", "")]
+        assert len(pushes) == 1 and pushes[0]["level"] == "error"
+        assert len(feed) == 2 and all("⏺" not in e["content"] for e in feed)
         phone.close()
     finally:
         reader.stop(flush_timeout=0)

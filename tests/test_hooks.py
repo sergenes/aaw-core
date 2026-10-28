@@ -299,7 +299,7 @@ def test_claude_transcript_latest_entry_only(tmp_path):
     assert "sign back in" in on_stop_claude.friendly_api_error_message(kind, text)
     assert on_stop_claude.friendly_api_error_message("limit", "usage limit reached") == "usage limit reached"
     assert "too long" in on_stop_claude.friendly_api_error_message("prompt_too_long", "x")
-    assert "interrupted" in on_stop_claude.friendly_api_error_message("connection", "ECONNRESET")
+    assert "Restart" in on_stop_claude.friendly_api_error_message("connection", "ECONNRESET")
 
 
 def test_model_from_transcript_per_agent(tmp_path):
