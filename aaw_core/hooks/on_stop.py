@@ -99,6 +99,10 @@ def main() -> int:
                     model = on_stop_claude.active_model(payload, agent)
                     if model:
                         transport.update_project(model=model)
+                if agent == "claude" and response_text and not api_error_text:
+                    # A turn that answered: the login works again, so the next expired
+                    # login is news worth a push (see on_stop_failure).
+                    on_stop_claude.auth_alert_file(settings, project).unlink(missing_ok=True)
                 if agent == "claude":
                     # A background agent that died on a usage limit sends no SubagentStop;
                     # Claude's own record of it does say finished.

@@ -181,7 +181,10 @@ def api_error_kind_from_text(text: str) -> str:
     """The error family a Claude message belongs to: "auth", "limit", "prompt_too_long",
     or "" when it matches none (the caller then shows the text as it is)."""
     low = text.lower()
-    if "login expired" in low or "not logged in" in low:
+    # "Login expired · Please run /login" (2026-10-26) and "Please run /login · API Error:
+    # 401 Invalid bearer token" (Claude Code 2.1.312) are the same story: sign in again.
+    if any(k in low for k in ("login expired", "not logged in", "please run /login", "invalid api key",
+                              "invalid bearer token", "oauth token has expired")):
         return "auth"
     if "usage limit" in low or "usage credits" in low or "session limit" in low:
         return "limit"
@@ -221,9 +224,25 @@ def friendly_api_error_message(kind: str, text: str) -> str:
                 f"a fresh session.\n\n({text})")
     if kind == "limit":
         return text  # already clear, and may carry a reset time the reminder feature parses
-    return ("Connection to Claude's API was interrupted. This is usually a brief network problem, not "
-            "a sign-in issue; Claude normally retries automatically. If this is the last message you "
-            f"see, just resend your prompt.\n\n({text})")
+    return ("Claude lost its connection to the API and the turn stopped. This is usually a network problem "
+            "on the computer, not a sign-in issue. Resend your prompt; if it keeps failing, use Restart in "
+            f"the session menu, which reconnects and keeps the conversation.\n\n({text})")
+
+
+# StopFailure's "error" field (Claude Code 2.1.312) to our families: the text decides
+# the rest, and anything else is a connection problem.
+STOP_FAILURE_KINDS = {"authentication_failed": "auth", "rate_limit": "limit", "billing_error": "limit"}
+
+
+def api_error_kind_from_stop_failure(error: str, text: str) -> str:
+    return STOP_FAILURE_KINDS.get(error) or api_error_kind_from_text(text) or "connection"
+
+
+def auth_alert_file(settings: Settings, project: str) -> Path:
+    """Present while a session's expired login has been pushed to the phone: every prompt
+    until the user signs in again fails the same way, and one push says it all. The next
+    turn that ends normally removes it."""
+    return settings.run_dir / f"auth_alert.{project}"
 
 
 # ── pane fallbacks ──────────────────────────────────────────────────────────
@@ -273,11 +292,11 @@ def scan_pane_for_keywords(session: str, keywords: tuple[str, ...]) -> str:
     """The first of the last 50 pane lines containing a keyword, plus up to 4 lines after it."""
     lines = pane_lines(session, scrollback=50)
     for i, line in enumerate(lines):
-        text = re.sub(r"^[⎿\s]+", "", line.strip()).strip()
+        text = re.sub(r"^[⎿⏺\s]+", "", line.strip()).strip()  # the pane's glyphs never reach the phone
         if any(kw in text.lower() for kw in keywords):
             out = [text]
             for j in range(i + 1, min(i + 5, len(lines))):
-                nxt = re.sub(r"^[⎿\s]+", "", lines[j].strip()).strip()
+                nxt = re.sub(r"^[⎿⏺\s]+", "", lines[j].strip()).strip()
                 if nxt and not re.match(r"^❯", nxt):
                     out.append(nxt)
                 else:
@@ -356,8 +375,13 @@ def run(payload: dict, settings: Settings, project: str, agent: str) -> tuple[st
             hook_log(settings, "on_stop", f"transcript empty after retries; falling back to tmux ({transcript_path})")
 
     if response:
-        # A real transcript reply wins over any banner sitting in the pane's scrollback.
-        # But the reply can itself be a structured API-error message: swap in an actionable one.
+        # A real transcript reply wins over any banner sitting in the pane's scrollback,
+        # and so does its verdict: an "API Error" line left on screen by an earlier failed
+        # turn is history (seen 2026-10-26: a turn that answered after its retries came
+        # through as "⏺ API Error: Unable to connect to API (EPROTO)" instead of "Response
+        # ready"). The reply can itself be a structured API-error message: swap in an
+        # actionable one.
+        api_error = ""
         kind, text = api_error_kind_from_transcript(transcript_path)
         if kind:
             response = friendly_api_error_message(kind, text)

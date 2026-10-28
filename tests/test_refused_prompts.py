@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import tempfile
 import time
+from pathlib import Path
 
 from aaw_core import daemon
+from aaw_core.config import Settings
 from aaw_core.hooks.on_stop_claude import api_error_kind_from_text
 from aaw_core.host import detect
 
@@ -60,6 +63,8 @@ def test_error_families():
 
 
 class _Transport:
+    project_id = "proj"
+
     def __init__(self):
         self.notifications: list[tuple[str, str]] = []
 
@@ -67,26 +72,30 @@ class _Transport:
         self.notifications.append((level, message))
 
 
+def _settings():
+    return Settings(state_dir=Path(tempfile.mkdtemp()), relay_url=None, computer_name="box", keep_awake=False)
+
+
 def test_watch_reports_once_and_clears():
     t = _Transport()
     watch = {"text": "Hey", "ts": time.monotonic()}
-    daemon.watch_for_refusal(t, "claude", REFUSAL_PANE, watch)
+    daemon.watch_for_refusal(t, _settings(), "claude", REFUSAL_PANE, watch)
     assert watch == {}
     assert len(t.notifications) == 1
     level, message = t.notifications[0]
     assert level == "error" and "/usage-credits" in message
-    daemon.watch_for_refusal(t, "claude", REFUSAL_PANE, watch)  # cleared: nothing more
+    daemon.watch_for_refusal(t, _settings(), "claude", REFUSAL_PANE, watch)  # cleared: nothing more
     assert len(t.notifications) == 1
 
 
 def test_watch_clears_on_turn_start_and_expiry():
     t = _Transport()
     watch = {"text": "Hey", "ts": time.monotonic()}
-    daemon.watch_for_refusal(t, "claude", "✢ Thinking\n❯ \nesc to interrupt", watch)
+    daemon.watch_for_refusal(t, _settings(), "claude", "✢ Thinking\n❯ \nesc to interrupt", watch)
     assert watch == {} and t.notifications == []
     watch = {"text": "Hey", "ts": time.monotonic() - 999}
-    daemon.watch_for_refusal(t, "claude", REFUSAL_PANE, watch)
+    daemon.watch_for_refusal(t, _settings(), "claude", REFUSAL_PANE, watch)
     assert watch == {} and t.notifications == []
     watch = {"text": "Hey", "ts": time.monotonic()}
-    daemon.watch_for_refusal(t, "codex", REFUSAL_PANE, watch)  # Claude-shaped only, for now
+    daemon.watch_for_refusal(t, _settings(), "codex", REFUSAL_PANE, watch)  # Claude-shaped only, for now
     assert watch and t.notifications == []

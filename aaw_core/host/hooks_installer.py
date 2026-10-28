@@ -153,6 +153,9 @@ def update_claude_hooks() -> Path:
     # Claude only: the running-subagents set behind "Waiting for N background agents".
     merge_hook(hooks, "SubagentStart", "on_subagent", timeout=10)
     merge_hook(hooks, "SubagentStop", "on_subagent", timeout=10)
+    # Claude only: a turn that dies on an API error (an expired login, a connection out
+    # of retries) fires StopFailure instead of Stop.
+    merge_hook(hooks, "StopFailure", "on_stop_failure", timeout=30)
     settings["hooks"] = hooks
     _write_json(path, settings)
     return path
