@@ -168,3 +168,23 @@ def test_malformed_records_are_ignored(tmp_path):
     on_subagent.update_subagents(s, "p", add="a2")
     assert on_subagent.finished_ids(["a1", "a2"], t) == []
     assert on_subagent.reconcile_subagents(s, "p", t) is None
+
+
+def test_a_resumed_finished_agent_shows_and_clears_again(monkeypatch, tmp_path):
+    # Seen live 2026-11-02: an agent finishes (Stop, record says finished), the coordinator
+    # resumes it (Start again, same id) while Claude's record still says finished from the
+    # first run. The hook must show it running again and clear it on its second Stop; it
+    # instead wrote the stale id to the project and ignored the Stop ("never shown").
+    t = _record(tmp_path, "sess", "a1", None)
+    tr = _Transport()
+    start = {"hook_event_name": "SubagentStart", "agent_id": "a1", "transcript_path": t}
+    stop = {"hook_event_name": "SubagentStop", "agent_id": "a1", "transcript_path": t}
+    assert _run(monkeypatch, tmp_path, start, tr) == 0
+    _record(tmp_path, "sess", "a1", True)
+    assert _run(monkeypatch, tmp_path, stop, tr) == 0
+    assert tr.projects[-1] == {"background_agents": []}
+    assert _run(monkeypatch, tmp_path, start, tr) == 0
+    assert tr.projects[-1] == {"background_agents": ["a1"]}
+    assert on_subagent.update_subagents(_settings(tmp_path), "p") == ["a1"]
+    assert _run(monkeypatch, tmp_path, stop, tr) == 0
+    assert tr.projects[-1] == {"background_agents": []}
