@@ -80,9 +80,12 @@ def finished_ids(ids: list[str], transcript_path: str) -> list[str]:
     return done
 
 
-def reconcile_subagents(settings: Settings, project: str, transcript_path: str | None = None) -> list[str] | None:
+def reconcile_subagents(settings: Settings, project: str, transcript_path: str | None = None,
+                        keep: str | None = None) -> list[str] | None:
     """Drop every id whose agent Claude recorded as finished. Returns the new set when
-    something was dropped, else None. Without a transcript path the sidecar is used."""
+    something was dropped, else None. Without a transcript path the sidecar is used.
+    ``keep`` is the agent the current event is about: a resumed agent's record still says
+    finished from its previous run, so its own event outranks the record."""
     if transcript_path is None:
         try:
             transcript_path = transcript_file(settings, project).read_text().strip()
@@ -91,7 +94,7 @@ def reconcile_subagents(settings: Settings, project: str, transcript_path: str |
     ids = update_subagents(settings, project)
     if not ids:
         return None
-    done = finished_ids(ids, transcript_path)
+    done = [i for i in finished_ids(ids, transcript_path) if i != keep]
     if not done:
         return None
     for agent_id in done:
@@ -152,9 +155,11 @@ def main() -> int:
     else:
         return 0
     hook_log(settings, "on_subagent", f"{event} {agent_id} -> {len(ids)} running")
-    # Other agents in the set may have died without a Stop (usage limit); the one that
-    # just started or stopped is not finished by its own record yet, so this is safe.
-    ids = reconcile_subagents(settings, project, transcript_path or None) or ids
+    # Other agents in the set may have died without a Stop (usage limit). The one this
+    # event is about is kept: a resumed agent's record still says finished from before.
+    reconciled = reconcile_subagents(settings, project, transcript_path or None, keep=agent_id)
+    if reconciled is not None:
+        ids = reconciled
     transport = open_transport(settings, project)
     try:
         if transport is not None:

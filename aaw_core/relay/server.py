@@ -17,6 +17,9 @@ Frames are JSON text messages with a ``type``:
     computer         {req}                                      (phone)    read the computer doc
     project_delete   {project_id}                               (either)   forget a session entirely
     forget_phone     {req}                                      (phone)    unlink: drop this token and its push token
+    share            {req, project_id, guest_token, label_enc?} (phone)    mint a guest token scoped to one session
+    shares           {req, project_id?}                         (phone)    the guests of a session, or of every session
+    revoke_share     {req, project_id, share_id}                (phone)    drop a guest (its sockets close)
     command          {project_id, command}                      (either)   new command / prompt / answer
     command_update   {project_id, command_id, fields}           (either)
     command_delete   {project_id, command_id}                   (either)
@@ -36,7 +39,7 @@ Frames are JSON text messages with a ``type``:
     welcome {computer_id}; event {project_id, seq, event}; state; computer; command;
     command_update; command_delete; history {req, project_id, events}; commands {req, project_id, commands};
     project {req, project_id, fields}; projects {req, projects}; computer {req, fields}; clear_events {project_id};
-    project_delete {project_id}; forgotten {req};
+    project_delete {project_id}; forgotten {req}; shares {req, project_id?, shares[{id, project_id, label_enc, platform, created, last_seen}]};
     request {req, kind, payload} (to the computer); response {req, kind, payload} (to the phones;
     the relay itself answers {error: "offline"} when no computer socket is live);
     pong; error {message} (then the socket closes)
@@ -50,6 +53,13 @@ that computer (it rides in the QR code). Tokens are routing credentials only; th
 encryption key never reaches the relay. A computer_id whose token is live or was
 seen recently cannot be claimed by a new token; only an id idle beyond
 ``REBIND_IDLE_DAYS`` (a wiped reinstall) may rebind.
+
+A phone token may be scoped to one session (``devices.scope``, a project_id): a guest
+the owner's phone invited with ``share``. A scoped socket is accepted only for frames
+that carry its project id, its ``projects`` listing holds that one project, and
+``request`` (browse, fetch, start a session) and ``project_delete`` are refused; it
+is forwarded and pushed only that session's traffic (plus the computer document).
+Only an unscoped phone may mint, list or revoke guests.
 
 Abuse limits (the ``Abuse limits`` constants): incoming frames are capped in size
 and per-connection rate, a socket must say hello within a deadline, history
@@ -93,7 +103,7 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (
   token TEXT PRIMARY KEY, computer_id TEXT NOT NULL, role TEXT NOT NULL,
   computer_name TEXT DEFAULT '', platform TEXT DEFAULT '', push_token TEXT DEFAULT '',
-  last_seen INTEGER DEFAULT 0);
+  last_seen INTEGER DEFAULT 0, scope TEXT DEFAULT '', label_enc TEXT DEFAULT '', created INTEGER DEFAULT 0);
 CREATE INDEX IF NOT EXISTS devices_computer ON devices(computer_id, role);
 CREATE TABLE IF NOT EXISTS events (
   id TEXT NOT NULL, computer_id TEXT NOT NULL, project_id TEXT NOT NULL,
@@ -122,7 +132,10 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 # The store's on-disk format. 2 hashes the device and cursor tokens at rest; a relay
 # older than the store refuses to start (better a loud stop than every token silently
 # rejected), and the migration leaves a snapshot next to the store for a clean rollback.
-STORE_VERSION = 3  # 2: hashed tokens; 3: keys scoped by computer, stored plaintext purged
+STORE_VERSION = 4  # 2: hashed tokens; 3: keys scoped by computer, plaintext purged; 4: guest scopes
+
+
+SHARE_ID_LEN = 16  # the prefix of a guest token's hash that names it to the owner's phone
 
 
 def _token_hash(token: str) -> str:
@@ -138,6 +151,10 @@ def _is_token_hash(value: str) -> bool:
 
 # The project fields a phone may set; everything else on the document is the computer's.
 PHONE_STATE_FIELDS = {"auto_approve", "pending_message"}
+
+# The frames a session-scoped guest may send, each checked against its project_id.
+GUEST_SESSION_FRAMES = frozenset({"subscribe", "ack", "history", "commands", "command", "command_update",
+                                  "command_delete", "project", "state"})
 
 # ── Abuse limits ─────────────────────────────────────────────────────────────
 # The relay is internet-facing and registration is trust on first use, so every limit
@@ -160,7 +177,8 @@ CONNECTIONS_PER_ADDR = 40            # concurrent sockets per client address
 REBIND_IDLE_DAYS = 30                # a new token may claim a computer_id only this long after
                                      # its old token was last seen (a wiped reinstall), never live
 MAX_FIELD_LEN = {"token": 128, "phone_token": 128, "computer_id": 64, "computer_name": 200,
-                 "platform": 32, "push_token": 512, "project_id": 256, "event_id": 128}
+                 "platform": 32, "push_token": 512, "project_id": 256, "event_id": 128,
+                 "guest_token": 128, "share_id": 32, "label_enc": 512}
 
 
 def _bad_str(value, kind: str, *, required: bool = True) -> bool:
@@ -225,6 +243,7 @@ class Conn:
     token: str
     role: str
     computer_id: str
+    scope: str = ""  # a guest phone: the one project_id it may see; "" for everything
     id: str = field(default_factory=lambda: uuid.uuid4().hex)  # one token may hold several sockets
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     frames: RateLimiter = field(default_factory=lambda: RateLimiter(FRAMES_PER_MINUTE, 60))
@@ -236,6 +255,19 @@ class Conn:
 
 def _now_s() -> int:
     return int(time.time())
+
+
+def _sees(conn: Conn, frame: dict) -> bool:
+    """Whether a frame may reach this socket: everything for a full peer; for a guest, its
+    own session's frames and the computer document. A `response` to another phone's
+    request never reaches a guest (a folder listing is encrypted, but the guest holds the
+    key), nor does a `project_delete` or `clear_events` of another session."""
+    scope = getattr(conn, "scope", "")
+    if not scope:
+        return True
+    if frame.get("type") == "computer":
+        return True
+    return frame.get("project_id") == scope
 
 
 class Relay:
@@ -284,6 +316,8 @@ class Relay:
             await self._migrate_hash_tokens()
         if found < 3:
             await self._migrate_scope_keys_and_purge_plaintext()
+        if found < 4:
+            await self._migrate_guest_columns()
         await self.db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('store_version', ?)",
                               (str(STORE_VERSION),))
         await self.db.commit()
@@ -333,6 +367,15 @@ class Relay:
                                       (json.dumps(payload), r["computer_id"], r["id"]))
         log.info("store migration: keys scoped by computer; plaintext purged from %d documents", purged)
 
+    async def _migrate_guest_columns(self) -> None:
+        """Version 4 (0.1.13): the device columns for a guest token scoped to one session.
+        ``executescript(_SCHEMA)`` leaves an existing table alone, so they are added here."""
+        for column, decl in (("scope", "TEXT DEFAULT ''"), ("label_enc", "TEXT DEFAULT ''"),
+                             ("created", "INTEGER DEFAULT 0")):
+            with suppress(Exception):  # already there on a store created by this version's schema
+                await self.db.execute(f"ALTER TABLE devices ADD COLUMN {column} {decl}")
+        log.info("store migration: guest scope columns added to devices")
+
     def _snapshot_store(self) -> None:
         """A consistent copy of the store next to it, taken once before a migration."""
         if self.db_path == ":memory:" or not os.path.exists(self.db_path):
@@ -370,9 +413,10 @@ class Relay:
             await self.db.execute(sql, params)
             await self.db.commit()
 
-    def _peers(self, computer_id: str, *, exclude: str | None = None, role: str | None = None) -> list[Conn]:
+    def _peers(self, computer_id: str, *, exclude: str | None = None, role: str | None = None,
+               frame: dict | None = None) -> list[Conn]:
         return [c for t, c in self.live.get(computer_id, {}).items()
-                if t != exclude and (role is None or c.role == role)]
+                if t != exclude and (role is None or c.role == role) and (frame is None or _sees(c, frame))]
 
     async def _forward(self, computer_id: str, frame: dict, *, exclude: str | None = None,
                        role: str | None = None) -> int:
@@ -383,7 +427,7 @@ class Relay:
         filled and nothing drained it) used to block the loop, and every phone request to
         that computer waited for minutes until the socket timed out on its own (seen
         2026-10-20). Now the dead peer costs one SEND_TIMEOUT_S, once, and is dropped."""
-        peers = self._peers(computer_id, exclude=exclude, role=role)
+        peers = self._peers(computer_id, exclude=exclude, role=role, frame=frame)
         if not peers:
             return 0
         results = await asyncio.gather(*(self._send_to(conn, frame) for conn in peers))
@@ -458,7 +502,10 @@ class Relay:
             if conn is None:
                 return
             self.live.setdefault(conn.computer_id, {})[conn.id] = conn
-            await conn.send({"type": "welcome", "computer_id": conn.computer_id, "proto": PROTO_VERSION})
+            welcome = {"type": "welcome", "computer_id": conn.computer_id, "proto": PROTO_VERSION}
+            if conn.scope:
+                welcome["scope"] = conn.scope
+            await conn.send(welcome)
             if conn.role == "computer":
                 await self._cleanup()
                 await self._replay_commands(conn)
@@ -507,7 +554,7 @@ class Relay:
             await self._error(ws, "invalid hello")
             return None
         token = _token_hash(token)  # the raw token never touches the store or the logs
-        row = await self._fetchone("SELECT computer_id, role FROM devices WHERE token=?", (token,))
+        row = await self._fetchone("SELECT computer_id, role, scope FROM devices WHERE token=?", (token,))
         if role == "computer":
             computer_id = hello.get("computer_id")
             if _bad_str(computer_id, "computer_id"):
@@ -552,9 +599,10 @@ class Relay:
                              (hello.get("platform", ""), _now_s(), token))
             kept = await self._fetchone("SELECT push_token FROM devices WHERE token=?", (token,))
             push_state = "kept" if kept and kept["push_token"] else "no"
-        log.info("phone %s (%s, push %s) connected to computer %s", _short(token), hello.get("platform") or "?",
-                 push_state, row["computer_id"])
-        return Conn(ws=ws, token=token, role="phone", computer_id=row["computer_id"])
+        scope = row["scope"] or ""
+        log.info("phone %s (%s, push %s) connected to computer %s%s", _short(token), hello.get("platform") or "?",
+                 push_state, row["computer_id"], f" as a guest of {scope}" if scope else "")
+        return Conn(ws=ws, token=token, role="phone", computer_id=row["computer_id"], scope=scope)
 
     async def _refuse_registration(self, computer_id: str, addr: str) -> str:
         """Why a fresh token may not register this computer_id, or "" when it may.
@@ -601,11 +649,26 @@ class Relay:
             "commands": self._on_commands, "project": self._on_project, "clear_events": self._on_clear_events,
             "projects": self._on_projects, "request": self._on_request, "response": self._on_response,
             "project_delete": self._on_project_delete, "forget_phone": self._on_forget_phone,
+            "share": self._on_share, "shares": self._on_shares, "revoke_share": self._on_revoke_share,
         }.get(kind)
         if handler is None:
             await conn.send({"type": "error", "message": f"unknown frame type {kind!r}"})
             return
+        if conn.scope and not self._guest_may(conn, kind, frame):
+            await conn.send({"type": "error", "message": "not allowed for a shared session", "req": frame.get("req")})
+            return
         await handler(conn, frame)
+
+    @staticmethod
+    def _guest_may(conn: Conn, kind: str, frame: dict) -> bool:
+        """What a session-scoped guest may send: its own session's frames, the computer
+        document, pings and its own unlink. Never a `request` (browse, fetch, start or stop
+        a session), a `project_delete`, or the sharing frames."""
+        if kind in ("ping", "forget_phone", "computer", "projects"):
+            return True
+        if kind in GUEST_SESSION_FRAMES:
+            return frame.get("project_id") == conn.scope
+        return False
 
     async def _on_ping(self, conn: Conn, frame: dict) -> None:
         await conn.send({"type": "pong"})
@@ -694,8 +757,9 @@ class Relay:
             log.warning("push suppressed for computer %s: over the push budget", computer_id)
             return
         rows = await self._fetchall(
-            "SELECT token, push_token, platform FROM devices WHERE computer_id=? AND role='phone' AND push_token<>''",
-            (computer_id,))
+            "SELECT token, push_token, platform FROM devices WHERE computer_id=? AND role='phone'"
+            " AND push_token<>'' AND (scope='' OR scope=?)",
+            (computer_id, project_id))
         # One phone may hold several tokens (one per scan), all with its one push token: one
         # push per phone, and none at all when any of its tokens acked the event on screen.
         on_screen = {r["push_token"] for r in rows if r["token"] in skip_tokens}
@@ -764,6 +828,78 @@ class Relay:
         log.info("phone %s forgotten by its own request (unlink), computer %s", _short(conn.token), conn.computer_id)
         await conn.send({"type": "forgotten", "req": frame.get("req")})
 
+    async def _on_share(self, conn: Conn, frame: dict) -> None:
+        """The owner's phone invites a guest to one session: it minted the token (and put it,
+        with the key and this session's id, in a QR for the guest) and registers it here,
+        scoped. The computer is not involved; an unscoped phone already holds everything."""
+        if conn.role != "phone":
+            return
+        project_id, token, label = frame["project_id"], frame["guest_token"], frame.get("label_enc") or ""
+        if _bad_str(project_id, "project_id") or _bad_str(token, "guest_token") or _bad_str(label, "label_enc",
+                                                                                               required=False):
+            await conn.send({"type": "error", "message": "invalid share", "req": frame.get("req")})
+            return
+        token = _token_hash(token)
+        taken = await self._fetchone("SELECT 1 FROM devices WHERE token=?", (token,))
+        if taken is not None:
+            await conn.send({"type": "error", "message": "invalid share", "req": frame.get("req")})
+            return
+        await self._exec(
+            "INSERT INTO devices(token, computer_id, role, scope, label_enc, created, last_seen) VALUES(?,?,?,?,?,?,?)",
+            (token, conn.computer_id, "phone", project_id, label, _now_s(), 0))
+        log.info("phone %s shared session %s of computer %s with guest token %s", _short(conn.token), project_id,
+                 conn.computer_id, _short(token))
+        await self._send_shares(conn, frame.get("req"), project_id)
+
+    async def _on_shares(self, conn: Conn, frame: dict) -> None:
+        """One session's guests, or every guest on the computer when `project_id` is absent
+        (the owner's overview of what is shared)."""
+        if conn.role != "phone":
+            return
+        await self._send_shares(conn, frame.get("req"), frame.get("project_id"))
+
+    async def _on_revoke_share(self, conn: Conn, frame: dict) -> None:
+        """Drop a guest: its token, its cursors and its live sockets. The guest keeps the key
+        for whatever it already fetched; rotation is a later feature."""
+        if conn.role != "phone":
+            return
+        project_id, share_id = frame["project_id"], frame["share_id"]
+        if _bad_str(project_id, "project_id") or _bad_str(share_id, "share_id"):
+            await conn.send({"type": "error", "message": "invalid share", "req": frame.get("req")})
+            return
+        rows = await self._fetchall(
+            "SELECT token FROM devices WHERE computer_id=? AND role='phone' AND scope=? AND substr(token,1,?)=?",
+            (conn.computer_id, project_id, len(share_id), share_id))
+        for r in rows:
+            async with self.write_lock:
+                await self.db.execute("DELETE FROM devices WHERE token=?", (r["token"],))
+                await self.db.execute("DELETE FROM cursors WHERE token=?", (r["token"],))
+                await self.db.commit()
+            for peer in [c for c in self.live.get(conn.computer_id, {}).values() if c.token == r["token"]]:
+                self.live.get(conn.computer_id, {}).pop(peer.id, None)
+                await self._error(peer.ws, "access revoked")
+            log.info("guest %s of session %s revoked by phone %s", _short(r["token"]), project_id, _short(conn.token))
+        await self._send_shares(conn, frame.get("req"), project_id)
+
+    async def _send_shares(self, conn: Conn, req, project_id: str | None) -> None:
+        if project_id is None:
+            rows = await self._fetchall(
+                "SELECT token, scope, label_enc, platform, created, last_seen FROM devices"
+                " WHERE computer_id=? AND role='phone' AND scope<>'' ORDER BY scope, created",
+                (conn.computer_id,))
+        else:
+            rows = await self._fetchall(
+                "SELECT token, scope, label_enc, platform, created, last_seen FROM devices"
+                " WHERE computer_id=? AND role='phone' AND scope=? ORDER BY created",
+                (conn.computer_id, project_id))
+        reply = {"type": "shares", "req": req,
+                 "shares": [{"id": r["token"][:SHARE_ID_LEN], "project_id": r["scope"],
+                             "label_enc": r["label_enc"] or "", "platform": r["platform"] or "",
+                             "created": r["created"] or 0, "last_seen": r["last_seen"] or 0} for r in rows]}
+        if project_id is not None:
+            reply["project_id"] = project_id
+        await conn.send(reply)
+
     async def _on_project_delete(self, conn: Conn, frame: dict) -> None:
         """Forget a session: its document, feed, commands and cursors (the phone's "remove")."""
         project_id = frame["project_id"]
@@ -800,9 +936,9 @@ class Relay:
 
     async def _on_command_update(self, conn: Conn, frame: dict) -> None:
         project_id, command_id, fields = frame["project_id"], frame["command_id"], frame.get("fields") or {}
-        row = await self._fetchone("SELECT doc FROM commands WHERE id=? AND computer_id=?",
+        row = await self._fetchone("SELECT doc, project_id FROM commands WHERE id=? AND computer_id=?",
                                    (command_id, conn.computer_id))
-        if row is None:
+        if row is None or (conn.scope and row["project_id"] != conn.scope):
             return
         doc = json.loads(row["doc"])
         doc.update(fields)
@@ -818,7 +954,11 @@ class Relay:
 
     async def _on_command_delete(self, conn: Conn, frame: dict) -> None:
         project_id, command_id = frame["project_id"], frame["command_id"]
-        await self._exec("DELETE FROM commands WHERE id=? AND computer_id=?", (command_id, conn.computer_id))
+        if conn.scope:
+            await self._exec("DELETE FROM commands WHERE id=? AND computer_id=? AND project_id=?",
+                             (command_id, conn.computer_id, conn.scope))
+        else:
+            await self._exec("DELETE FROM commands WHERE id=? AND computer_id=?", (command_id, conn.computer_id))
         await self._forward(conn.computer_id, {"type": "command_delete", "project_id": project_id,
                                                "command_id": command_id}, exclude=conn.id)
 
@@ -888,7 +1028,12 @@ class Relay:
     async def _on_projects(self, conn: Conn, frame: dict) -> None:
         """Every project document of this computer, keyed by project id (the supervisor's
         registry of sessions, live and stopped)."""
-        rows = await self._fetchall("SELECT project_id, doc FROM projects WHERE computer_id=?", (conn.computer_id,))
+        if conn.scope:
+            rows = await self._fetchall("SELECT project_id, doc FROM projects WHERE computer_id=? AND project_id=?",
+                                        (conn.computer_id, conn.scope))
+        else:
+            rows = await self._fetchall("SELECT project_id, doc FROM projects WHERE computer_id=?",
+                                        (conn.computer_id,))
         await conn.send({"type": "projects", "req": frame.get("req"),
                          "projects": {r["project_id"]: json.loads(r["doc"]) for r in rows}})
 
