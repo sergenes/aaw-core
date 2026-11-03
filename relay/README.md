@@ -39,7 +39,7 @@ Event and command payload shapes, and which fields are encrypted, are the contra
 ## Store schema (SQLite)
 
 ```
-devices(token PK, computer_id, role, computer_name, platform, push_token, last_seen)
+devices(token PK, computer_id, role, computer_name, platform, push_token, last_seen, scope, label_enc, created)
 events(id PK, computer_id, project_id, seq, ts, type, payload, expires_at)
 seqs(computer_id, project_id, last_seq)
 cursors(token, computer_id, project_id, last_ack_seq)
@@ -49,6 +49,8 @@ computers(computer_id PK, doc)
 ```
 
 `payload` and `doc` hold the documents as the devices wrote them: every sensitive field inside is ciphertext.
+A phone row with a non-empty `scope` is a guest token for that one session (store version 4, aaw-core 0.1.13): the owner's phone minted it with `share`, and the relay accepts it only for that session's frames, forwards and pushes it only that session's traffic, and refuses `request` and `project_delete` from it.
+`label_enc` is the owner's name for the guest, encrypted by the owner's phone.
 
 ## Capacity
 
@@ -58,5 +60,5 @@ One tuned node holds tens of thousands of idle sockets on a small box; message r
 
 The store carries a version (`meta.store_version`).
 A relay older than the store refuses to start with a clear message rather than silently rejecting every token.
-When a relay upgrades the store (0.1.3 hashes the device and cursor tokens at rest), it first writes a consistent snapshot next to it, `relay.sqlite.pre-v2`.
+When a relay upgrades the store (0.1.3 hashes the device and cursor tokens at rest; 0.1.9 scopes keys by computer; 0.1.13 adds the guest columns), it first writes a consistent snapshot next to it, `relay.sqlite.pre-v<N>`.
 To roll back: stop the relay, replace `relay.sqlite` with the snapshot (and delete the `-wal`/`-shm` files), and start the previous version; only the events since the upgrade are lost.

@@ -93,6 +93,10 @@ Compact JSON, keys sorted.
 The token is registered with the relay before the QR is shown; the key never reaches the relay.
 Each `aaw link` mints a new token; earlier ones keep working.
 
+A guest QR (session sharing, phones 2.13 with a 0.1.13 relay) is the same payload with one more field, `"scope": "<project_id>"`, shown by the owner's phone, which holds the key and the relay URL already.
+The owner's phone generates the token and registers it with `share` before showing the QR.
+The guest app treats the computer as a shared session: that one session, no folder browsing, no new sessions.
+
 ## 7. Relay frames
 
 Documented in the module docstring of `aaw_core/relay/server.py` and summarized in `relay/README.md`.
@@ -103,6 +107,14 @@ The phone connects with `hello {role: "phone", token, platform?, push_token?}`, 
 It may set `auto_approve` and `pending_message` on a project with `state` (other fields are dropped), and forget a session with `project_delete`.
 It never writes events: the computer echoes a delivered prompt and a consumed answer into the feed as `message` events with `role: user`.
 On unlink, or when the user removes the computer, it sends `forget_phone {req}` (answered by `forgotten`): the relay drops that token and its push token, so no push reaches the phone again.
+
+Session sharing (relay store version 4, 0.1.13).
+An unscoped phone mints a guest with `share {req, project_id, guest_token, label_enc?}` (the token is its own random value; `label_enc` is the owner's name for the guest, encrypted), lists them with `shares {req, project_id}` (without `project_id`: every guest on the computer, the owner's overview), and drops one with `revoke_share {req, project_id, share_id}`; each is answered with `shares {req, project_id?, shares[{id, project_id, label_enc, platform, created, last_seen}]}`, and a revoked guest's sockets are closed with `error {message: "access revoked"}`.
+A guest's `welcome` carries `scope`, its project id.
+The relay accepts from a guest only `ping`, `forget_phone`, `computer`, `projects` (filtered to its session), and `subscribe`, `ack`, `history`, `commands`, `command`, `command_update`, `command_delete`, `project` and `state` carrying its project id; anything else, `request` and `project_delete` included, is answered with `error {message: "not allowed for a shared session", req}`.
+It forwards a guest only its session's frames and the computer document, and pushes it only for its session.
+Sharing is free on every plan and a guest keeps full control of the session (prompts, answers, stop and restart through commands); the owner cannot see or approve a guest's prompts before they run.
+A revoked guest keeps the key, so history it already fetched stays readable; key rotation is not part of this version.
 
 The phone's `request` frames the supervisor answers (`response {req, kind, payload}`):
 
@@ -118,7 +130,7 @@ The phone's `request` frames the supervisor answers (`response {req, kind, paylo
 When no computer socket is live the relay itself answers `{"error": "offline"}`.
 
 The relay enforces limits on every client (the `Abuse limits` constants in `aaw_core/relay/server.py`).
-Incoming frames are capped at 1 MiB and budgeted per connection; a socket must say hello within 10 s. Each computer keeps at most 64 MiB on the relay, event payloads and command documents together, and at most 500 unconsumed commands; past that a write is answered with `error: storage quota exceeded`. The store (version 3 since 0.1.9) keys events and commands by computer and id, so two computers may use the same ids, and a migration from version 2 purges the plaintext `args`, `answer` and `options` that older writers stored next to their encrypted copies, after a rollback snapshot `<db>.pre-v3`.
+Incoming frames are capped at 1 MiB and budgeted per connection; a socket must say hello within 10 s. Each computer keeps at most 64 MiB on the relay, event payloads and command documents together, and at most 500 unconsumed commands; past that a write is answered with `error: storage quota exceeded`. The store (version 3 since 0.1.9, version 4 since 0.1.13 with the guest columns) keys events and commands by computer and id, so two computers may use the same ids, and a migration from version 2 purges the plaintext `args`, `answer` and `options` that older writers stored next to their encrypted copies, after a rollback snapshot `<db>.pre-v3`.
 A `history` response returns at most 1000 events and 8 MiB of payload, newest first, whatever `limit` asks.
 Each computer may retain at most 64 MiB of event payload; an `event` beyond that is answered with `error {message: "storage quota exceeded"}` and not stored.
 A fresh token cannot register a `computer_id` that is live or was seen in the last 30 days under another token; only a long-idle id (a wiped reinstall) rebinds.
