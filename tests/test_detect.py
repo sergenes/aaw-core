@@ -505,3 +505,59 @@ def test_a_tool_approval_keeps_its_tool_line_and_is_not_a_menu():
     assert perm["options"][0] == "Yes" and perm["options"][-1] == "No"
     for pane in (PERM_PANE, PLAN_MENU_PANE):  # the older shapes are approvals too
         assert detect.detect_permission_prompt(pane)["menu"] is False
+
+
+MCP_ONE_PANE = """
+  New MCP server found in this project: a
+
+  MCP servers may execute code or access system resources. All tool calls require approval.
+
+    Use this MCP server
+    Use this and all future MCP servers in this project
+  ❯ Continue without using this MCP server
+
+  Enter to confirm · Esc to cancel
+"""
+
+MCP_MANY_PANE = """
+  2 new MCP servers found in this project
+  Select any you wish to enable.
+
+  MCP servers may execute code or access system resources. All tool calls require approval.
+
+  ❯ [ ] fetch
+    [✔] sequential-thinking
+       Enable selected
+
+ Space to select · Esc to reject all
+"""
+
+
+def test_a_single_mcp_server_is_a_menu_for_the_phone():
+    d = detect.detect_claude_mcp_dialog(MCP_ONE_PANE)
+    assert d["mode"] == "menu" and d["cursor"] == 2 and len(d["options"]) == 3
+    assert detect.mcp_menu_keys(d, d["options"][0]) == ["Up", "Up", "Enter"]
+    assert detect.mcp_menu_keys(d, d["options"][2]) == ["Enter"]
+    assert detect.mcp_menu_keys(d, "nonsense") is None
+
+
+def test_several_mcp_servers_are_enable_or_skip_all():
+    d = detect.detect_claude_mcp_dialog(MCP_MANY_PANE)
+    assert d["options"] == ["Enable all", "Skip all"] and "fetch, sequential-thinking" in d["question"]
+    assert d["rows"] == [("fetch", False), ("sequential-thinking", True)] and d["cursor"] == 0
+    done = detect.detect_claude_mcp_dialog(MCP_MANY_PANE.replace("  ❯ [ ] fetch", "    [ ] fetch")
+                                           .replace("       Enable selected", "  ❯    Enable selected"))
+    assert done["cursor"] == 2
+
+
+def test_a_scrolled_mcp_checklist_says_how_many_are_out_of_view():
+    d = detect.detect_claude_mcp_dialog(MCP_MANY_PANE.replace("2 new MCP", "8 new MCP"))
+    assert d["count"] == 8 and "and 6 more" in d["question"]
+
+
+def test_mcp_dialogs_are_dialogs_not_an_idle_prompt():
+    for pane in (MCP_ONE_PANE, MCP_MANY_PANE):
+        assert detect.detect_idle_prompt(pane) is False
+        assert detect.dialog_is_open(pane, "claude") is True
+        assert detect.dialog_is_open(pane, "codex") is False
+    assert detect.detect_claude_mcp_dialog("❯ \n") is None

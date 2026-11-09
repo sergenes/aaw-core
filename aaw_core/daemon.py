@@ -274,6 +274,48 @@ def handle_command(cmd: dict, transport: RelayTransport, settings: Settings, *, 
 # ── Claude Code diagnostics ─────────────────────────────────────────────────
 
 
+def answer_mcp_dialog(session: str, answer: str) -> bool:
+    """Apply the phone's answer to Claude Code's MCP server dialog as it is on screen now.
+    False when the dialog is gone or the answer is not one of its options."""
+    dialog = detect.detect_claude_mcp_dialog(tmux.visible_pane(session))
+    if not dialog or answer not in dialog["options"]:
+        return False
+    if dialog["mode"] == "menu":
+        keys = detect.mcp_menu_keys(dialog, answer) or []
+        for key in keys:  # each key its own call: bundled keys are not registered
+            tmux.send_keys(session, key)
+            time.sleep(0.15)
+        return True
+    if answer == detect.MCP_SKIP_ALL:
+        tmux.send_keys(session, "Escape")
+        return True
+    # Up wraps around the server rows and never lands on "Enable selected", so `count` steps
+    # from any row visit every server once, however the list has scrolled.
+    def press(key: str) -> dict | None:
+        tmux.send_keys(session, key)
+        time.sleep(0.2)
+        return detect.detect_claude_mcp_dialog(tmux.visible_pane(session))
+
+    if dialog["cursor"] >= len(dialog["rows"]):
+        dialog = press("Up")
+    for _ in range(dialog["count"] if dialog else 0):
+        if not dialog["rows"][dialog["cursor"]][1]:
+            dialog = press("Space")
+            if not dialog:
+                return True
+        dialog = press("Up")
+        if not dialog:
+            return True
+    for _ in range((dialog["count"] if dialog else 0) + 1):  # Down stops at "Enable selected"
+        if dialog["cursor"] >= len(dialog["rows"]):
+            break
+        dialog = press("Down")
+        if not dialog:
+            return True
+    tmux.send_keys(session, "Enter")
+    return True
+
+
 def answer_keys(index: int, cursor: int | None) -> list[str]:
     """The keys that pick option `index` of a Claude Code menu. A digit picks options 1 to 9
     at once. Past that, "10" would be the keys 1 and 0, and the 1 alone picks the first
@@ -398,6 +440,9 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
     # Claude's "trust this folder" dialog (first open of a folder)
     trust_question_id: str | None = None
     trust_hash: str | None = None
+    # Claude's dialog for the MCP servers a repository's .mcp.json declares
+    mcp_question_id: str | None = None
+    mcp_hash: str | None = None
     perm_first_seen = 0.0
     # Cursor native prompt state
     cn_question_id: str | None = None
@@ -540,6 +585,24 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
                     trust_question_id, trust_hash = None, None
                     flush_pending_message(transport, session, agent)
 
+                # ── Claude Code dialog for a repository's MCP servers ──────
+                mcp = detect.detect_claude_mcp_dialog(pane) if agent == "claude" else None
+                if mcp and mcp["hash"] != mcp_hash:
+                    mcp_hash = mcp["hash"]
+                    if is_mobile_mode(settings):
+                        mcp_question_id = send_question(mcp["question"], mcp["options"], "choice",
+                                                        "Claude Code MCP servers")
+                        log(f"MCP server dialog sent to the phone ({mcp_question_id[:8]})")
+                    else:
+                        mcp_question_id = None
+                        log("MCP server dialog detected (desktop mode; not forwarding)")
+                elif not mcp and mcp_hash:
+                    if mcp_question_id:
+                        transport.set_project_status("running", pending_question_id="")
+                        log("MCP server dialog gone (answered on the desktop)")
+                    mcp_question_id, mcp_hash = None, None
+                    flush_pending_message(transport, session, agent)
+
                 # ── Claude Code permission prompt ──────────────────────────
                 perm = detect.detect_permission_prompt(pane)
                 if perm and perm["hash"] != perm_hash:
@@ -660,7 +723,7 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
 
                 # ── idle (Claude and Codex; not scoot, whose REPL is hook-managed) ──
                 if (agent != "scoot" and not perm and not perm_hash and not aq_hash and not ms_hash and not cn_hash
-                        and not trust_hash):
+                        and not trust_hash and not mcp_hash):
                     if detect.detect_idle_prompt(pane):
                         if idle_since is None:
                             idle_since = now
@@ -783,6 +846,19 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
                     log(f"phone answered the trust dialog {answer!r}")
                     trust_question_id = None  # trust_hash stays until the dialog is gone
                     flush_pending_message(transport, session, agent)
+
+            if mcp_question_id:
+                answer = transport.poll_perm_answer_once(mcp_question_id)
+                if answer is not None:
+                    if not answer_mcp_dialog(session, answer):
+                        log(f"MCP dialog answer {answer!r} does not apply; ignored, re-prompting")
+                        mcp_question_id, mcp_hash = None, None
+                    else:
+                        transport.set_project_status("running", pending_question_id="")
+                        set_mobile_mode(settings)
+                        log(f"phone answered the MCP server dialog {answer!r}")
+                        mcp_question_id = None  # mcp_hash stays until the dialog is gone
+                        flush_pending_message(transport, session, agent)
 
             if cn_question_id:
                 answer = transport.poll_perm_answer_once(cn_question_id)

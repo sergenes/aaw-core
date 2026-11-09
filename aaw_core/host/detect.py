@@ -336,6 +336,59 @@ def detect_claude_trust_dialog(pane: str) -> dict | None:
             "hash": hashlib.sha1(f"trust:{folder}".encode()).hexdigest()}
 
 
+MCP_ENABLE_ALL = "Enable all"
+MCP_SKIP_ALL = "Skip all"
+_MCP_ONE = re.compile(r"^New MCP server found in [^:]+:\s*(?P<name>.+)$")
+_MCP_MANY = re.compile(r"^(?P<count>\d+) new MCP servers found")
+_MCP_MENU_ROW = re.compile(r"^(?P<cursor>❯\s*)?(?:\d+\.\s+)?(?P<text>(?:Use this|Continue without)\b.*)$")
+_MCP_CHECK_ROW = re.compile(r"^(?P<cursor>❯\s*)?\[(?P<mark>.)\]\s+(?P<name>.+)$")
+_MCP_WARNING = "MCP servers may execute code or access system resources."
+
+
+def detect_claude_mcp_dialog(pane: str) -> dict | None:
+    """Claude Code's startup dialog for servers a repository's .mcp.json declares. One server
+    is a three-option menu; several are a checklist, all ticked at first, with "Enable
+    selected" under it. Nothing reaches the input prompt until it is answered. Returns
+    {question, options, mode, cursor, rows, hash} or None; `rows` are the menu's options or
+    the checklist rows in view as (name, ticked), and `cursor` may be on "Enable selected"
+    (len(rows)). A checklist also has `count`, every server, in view or not."""
+    lines = [ln.strip() for ln in pane.split("\n")]
+    one = next((m for m in map(_MCP_ONE.match, lines) if m), None)
+    if one and "Enter to confirm" in pane:
+        matches = [m for m in map(_MCP_MENU_ROW.match, lines) if m]
+        if not matches:
+            return None
+        rows = [m["text"] for m in matches]
+        cursor = next((i for i, m in enumerate(matches) if m["cursor"]), 0)
+        name = one["name"]
+        return {"question": f"Claude Code found a new MCP server in this project: {name}. {_MCP_WARNING}",
+                "options": rows, "mode": "menu", "cursor": cursor, "rows": rows,
+                "hash": hashlib.sha1(f"mcp:{name}".encode()).hexdigest()}
+    many = next((m for m in map(_MCP_MANY.match, lines) if m), None)
+    if not many or "Enable selected" not in pane or "Space to select" not in pane:
+        return None
+    matches = [m for m in map(_MCP_CHECK_ROW.match, lines) if m]
+    if not matches:
+        return None
+    rows = [(m["name"], m["mark"].strip() != "") for m in matches]
+    cursor = next((i for i, m in enumerate(matches) if m["cursor"]), len(rows))
+    count = int(many["count"])
+    names = ", ".join(name for name, _ in rows)
+    if len(rows) < count:  # the list scrolls; the hash ignores which rows are in view
+        names += f" and {count - len(rows)} more"
+    return {"question": f"Claude Code found {count} new MCP servers in this project: {names}. {_MCP_WARNING}",
+            "options": [MCP_ENABLE_ALL, MCP_SKIP_ALL], "mode": "checklist", "cursor": cursor, "rows": rows,
+            "count": count, "hash": hashlib.sha1(f"mcp:{count}".encode()).hexdigest()}
+
+
+def mcp_menu_keys(dialog: dict, answer: str) -> list[str] | None:
+    """The keys that pick `answer` in the one-server menu, or None if it is not an option."""
+    if answer not in dialog["options"]:
+        return None
+    move = dialog["options"].index(answer) - dialog["cursor"]
+    return ["Down"] * move + ["Up"] * -move + ["Enter"]
+
+
 def detect_idle_prompt(pane: str) -> bool:
     """Claude is at the ❯ input prompt and not processing (no spinner anywhere). The trust
     dialog's "❯ No, exit" is a cursor on an option, not the input prompt."""
@@ -348,6 +401,9 @@ def detect_idle_prompt(pane: str) -> bool:
     if any(c in SPINNERS for c in pane) or TRUST_YES in pane:
         return False
     tail = [ln.strip() for ln in pane.split("\n") if ln.strip()][-6:]
+    # A dialog's footer: its ❯ is a cursor on an option, whichever dialog this turns out to be.
+    if any(ln.startswith(("Enter to confirm", "Space to select")) for ln in tail):
+        return False
     return any(ln.startswith("❯") for ln in tail)
 
 
@@ -583,7 +639,7 @@ def dialog_is_open(pane: str, agent: str) -> bool:
         detect_permission_prompt(pane)
         or detect_ask_user_question(pane)
         or detect_multiselect_prompt(pane)
-        or (agent == "claude" and detect_claude_trust_dialog(pane))
+        or (agent == "claude" and (detect_claude_trust_dialog(pane) or detect_claude_mcp_dialog(pane)))
         or (agent == "cursor" and detect_cursor_native_prompt(pane))
         or (agent == "codex" and detect_codex_update_dialog(pane))
     )
