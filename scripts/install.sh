@@ -34,7 +34,15 @@ for a in "$@"; do
 done
 
 if [[ "$(id -u)" == "0" ]]; then
-  echo "Run this as your normal user, not root: aaw keeps its state and service in your home."
+  cat <<'ROOT'
+Agents At Work does not install as root: aaw keeps its key, state and login service in
+your home, and under root your sessions would not reach your phone.
+
+Create or switch to a normal user and run the installer there:
+  adduser you            # once, if the machine only has root
+  su - you
+  curl -fsSL https://agentsatwork.app/install-linux.sh | bash
+ROOT
   exit 1
 fi
 

@@ -196,3 +196,23 @@ def test_link_json_prints_only_the_payload(tmp_path, monkeypatch, capsys):
     cli.cmd_link(a, settings)
     out = capsys.readouterr().out.strip().splitlines()
     assert len(out) == 1 and json.loads(out[0])["token"] == "tok"
+
+
+def test_root_is_refused_with_what_to_do(monkeypatch, capsys):
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+    ran = []
+    monkeypatch.setattr(cli, "load_settings", lambda: ran.append("settings"))
+    for argv in (["start", "/root/proj"], ["link"], ["status"], []):
+        assert cli.main(argv) == 1
+        err = capsys.readouterr().err
+        assert "does not run as root" in err and "adduser" in err and "install-linux.sh" in err
+    assert ran == []  # stopped before touching any state
+    # Looking around and removing an install made as root still work.
+    assert not cli._refused_as_root(["uninstall", "--yes"])
+    assert not cli._refused_as_root(["quit"])
+    assert not cli._refused_as_root(["--help"])
+    with pytest.raises(SystemExit) as e:
+        cli.main(["--version"])
+    assert e.value.code == 0
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 501)
+    assert not cli._refused_as_root(["start", "proj"])

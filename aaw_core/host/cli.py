@@ -715,13 +715,29 @@ def cmd_supervisor(a, settings: Settings) -> None:
 # ── entry ────────────────────────────────────────────────────────────────────
 
 
-def _warn_if_root() -> None:
-    """Under root (or sudo) $HOME is /root: state, the session key and the folder browser
-    all resolve to root's home, and `systemctl --user` cannot manage the service."""
+ROOT_REFUSAL = """\
+aaw does not run as root.
+Under root it would keep its key, state and sessions in root's home, and it could not
+manage its login service (systemctl --user), so sessions would not reach your phone.
+
+Create or switch to a normal user and install there:
+  adduser you            # once, if the machine only has root
+  su - you
+  curl -fsSL https://agentsatwork.app/install-linux.sh | bash
+
+An install made as root earlier can be removed here with: aaw uninstall
+"""
+# What root may still run: looking around, and cleaning up an install made as root.
+_ROOT_MAY_RUN = frozenset({"uninstall", "quit", "-h", "--help", "--version"})
+
+
+def _refused_as_root(argv: list[str]) -> bool:
+    """Under root (or sudo) $HOME is root's: the session key, the state and the folder
+    browser all resolve there, and `systemctl --user` cannot manage the service. A warning
+    was not enough: people ran on and reported sessions that never reached the phone."""
     if getattr(os, "geteuid", lambda: 1)() != 0:
-        return
-    sys.stderr.write("\naaw is running as root; this is unsupported and will misbehave. "
-                     "Run it as your normal user, without sudo.\n\n")
+        return False
+    return not (argv and argv[0] in _ROOT_MAY_RUN)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -845,7 +861,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    _warn_if_root()
+    if _refused_as_root(sys.argv[1:] if argv is None else argv):
+        sys.stderr.write(ROOT_REFUSAL)
+        return 1
     hooks_installer.extend_path()  # so `aaw start` finds the agent from any shell
     a = build_parser().parse_args(argv)
     try:
