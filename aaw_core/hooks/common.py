@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from aaw_core.config import Settings, load_settings
+from aaw_core.hooks import owner
 
 if TYPE_CHECKING:
     from aaw_core.transport.relay import RelayTransport
@@ -62,16 +63,42 @@ def preamble() -> tuple[Settings, str, str]:
     project = env_project()
     if not project:
         sys.exit(0)
-    return settings, project, env_agent()
+    agent = env_agent()
+    # An agent the session's agent started (a script running `claude -p`) inherits the
+    # project variable and is not the session: its hooks stay silent too.
+    global _payload
+    _payload = _read_stdin_payload()
+    nested = owner.nested_agent(settings, project, agent, _payload)
+    if nested:
+        hook_log(settings, "nested", f"project={project!r} agent={agent} ignored {_hook_name()}: {nested}")
+        sys.exit(0)
+    return settings, project, agent
 
 
-def read_payload() -> dict:
-    """The hook's JSON payload from stdin, or {} if there is none or it is malformed."""
+_payload: dict | None = None  # read by preamble(), handed out once by read_payload()
+
+
+def _hook_name() -> str:
+    return os.path.splitext(os.path.basename(sys.argv[0] or ""))[0] or "hook"
+
+
+def _read_stdin_payload() -> dict:
     try:
         data = json.loads(sys.stdin.read())
     except (ValueError, OSError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def read_payload() -> dict:
+    """The hook's JSON payload from stdin, or {} if there is none or it is malformed.
+    preamble() has usually read it already (it needs the session id); stdin is read here
+    only when it has not."""
+    global _payload
+    if _payload is not None:
+        payload, _payload = _payload, None
+        return payload
+    return _read_stdin_payload()
 
 
 def hook_log(settings: Settings, name: str, msg: str) -> None:
