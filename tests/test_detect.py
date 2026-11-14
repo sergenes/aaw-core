@@ -561,3 +561,34 @@ def test_mcp_dialogs_are_dialogs_not_an_idle_prompt():
         assert detect.dialog_is_open(pane, "claude") is True
         assert detect.dialog_is_open(pane, "codex") is False
     assert detect.detect_claude_mcp_dialog("❯ \n") is None
+
+
+def test_idle_prompt_narrow_pane_mid_turn_is_busy():
+    # Real 2.1.325 captures, 2026-11-14: at 32 columns the shortcut row is cut before
+    # "interrupt", and the daemon wrote idle two seconds into a 20-second turn.
+    cut_hint = (
+        "✢ Photosynthesizing… (17s · ↓ 2\n"
+        "39 tokens)\n"
+        "────────────────────────────────\n"
+        "❯ \n"
+        "────────────────────────────────\n"
+        "  ⏸ manual mode on · esc to i…\n")
+    assert not detect.detect_idle_prompt(cut_hint)
+    # Auto mode's longer label can push the hint out entirely: the status line still tells.
+    no_hint = (
+        "✢ Photosynthesizing… (17s · ↓ 239 tokens)\n"
+        "────────\n"
+        "❯ \n"
+        "────────\n"
+        "  ⏵⏵ auto mode on (shift+tab to cyc…\n")
+    assert not detect.detect_idle_prompt(no_hint)
+    # The same narrow pane at rest: a finished-turn line and a cut row with no hint in it.
+    idle = (
+        "✻ Baked for 17m 15s · done 11:21 AM\n"
+        "────────\n"
+        "❯ \n"
+        "────────\n"
+        "  ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent · h…\n")
+    assert detect.detect_idle_prompt(idle)
+    # An ellipsis after "esc" that is not the hint ("escape…") does not hold idle back.
+    assert detect.detect_idle_prompt("see escape…\n────────\n❯ \n")

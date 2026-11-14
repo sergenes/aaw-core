@@ -389,6 +389,31 @@ def mcp_menu_keys(dialog: dict, answer: str) -> list[str] | None:
     return ["Down"] * move + ["Up"] * -move + ["Enter"]
 
 
+# A narrow pane cuts the shortcut row with an ellipsis ("⏸ manual mode on · esc to i…", seen
+# at 32 columns on 2.1.325; auto mode's longer label loses the hint below about 57), so
+# "esc to interrupt" is not there to find mid-turn.
+_CUT_INTERRUPT_HINT = re.compile(r"esc([ a-z]{0,12})…")
+# The live status line above the composer: "✢ Photosynthesizing… (17s · ↓ 239 tokens)",
+# "· Pouncing… (2s · thinking)". The finished-turn line ("✻ Baked for 4s · done ...") has
+# no ellipsis and no parenthesis.
+_STATUS_LINE = re.compile(r"^[·✢✳✶✻✽*] \S+… \(\d")
+
+
+def _turn_running_in_narrow_pane(pane: str) -> bool:
+    """A turn is running although the pane is too narrow to show "esc to interrupt": the
+    hint is there cut short, or the live status line sits above the composer. Without this
+    the daemon wrote idle two seconds into the turn and the phone's working indicator
+    vanished long before the response (seen 2026-11-14)."""
+    tail = [ln.strip() for ln in pane.split("\n") if ln.strip()][-8:]
+    for ln in tail:
+        cut = _CUT_INTERRUPT_HINT.search(ln)
+        if cut and " to interrupt".startswith(cut.group(1)):
+            return True
+        if _STATUS_LINE.match(ln):
+            return True
+    return False
+
+
 def detect_idle_prompt(pane: str) -> bool:
     """Claude is at the ❯ input prompt and not processing (no spinner anywhere). The trust
     dialog's "❯ No, exit" is a cursor on an option, not the input prompt."""
@@ -399,6 +424,8 @@ def detect_idle_prompt(pane: str) -> bool:
     if "esc to interrupt" in pane:
         return False
     if any(c in SPINNERS for c in pane) or TRUST_YES in pane:
+        return False
+    if _turn_running_in_narrow_pane(pane):
         return False
     tail = [ln.strip() for ln in pane.split("\n") if ln.strip()][-6:]
     # A dialog's footer: its ❯ is a cursor on an option, whichever dialog this turns out to be.

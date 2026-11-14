@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import time
 
 import pytest
@@ -63,8 +64,11 @@ def test_preamble_exits_unless_enabled_and_bridged(monkeypatch, settings):
         common.preamble()  # enabled, but not a bridged session
     monkeypatch.setenv("AAW_PROJECT", "proj")
     monkeypatch.setenv("AAW_AGENT", "grok")
+    monkeypatch.setattr("sys.stdin", io.StringIO('{"session_id": "s1"}'))
     s, project, agent = common.preamble()
     assert (s.state_dir, project, agent) == (settings.state_dir, "proj", "grok")
+    # preamble read stdin for the session id; read_payload hands that payload out once
+    assert common.read_payload() == {"session_id": "s1"}
 
 
 def test_read_payload(monkeypatch):
@@ -450,3 +454,106 @@ def test_notify_honours_local_notifications_off(tmp_path, monkeypatch):
     common.notify(None, "Response ready", "success", settings=on)
     common.notify(None, "Response ready", "success", settings=off)
     assert shown == ["\u2705 Response ready"] or len(shown) == 1
+
+
+# ── nested agents: an agent the session's agent started is not the session ───────────
+
+START = "Sat Nov 14 13:15:36 2026"
+
+
+def _table(*rows):
+    """pid -> (ppid, start, command) from (pid, ppid, command) rows."""
+    return {pid: (ppid, START, command) for pid, ppid, command in rows}
+
+
+# The session's own Claude (11183) under the tmux pane's shell, its hook (500) started
+# through sh; and a `claude -p` (700) that a script run by its Bash tool started.
+OWN = [(1, 0, "/sbin/launchd"), (11181, 1, "zsh"), (11183, 11181, "claude"),
+       (499, 11183, "/bin/sh"), (500, 499, "python3")]
+NESTED = [*OWN, (600, 11183, "/bin/zsh"), (650, 600, "python3"), (700, 650, "claude"),
+          (799, 700, "/bin/sh"), (800, 799, "python3")]
+
+
+def test_firing_agent_skips_shells():
+    from aaw_core.hooks import owner
+
+    table = _table(*NESTED)
+    assert owner.firing_agent(table, 500) == 11183
+    assert owner.firing_agent(table, 800) == 700
+    assert owner.firing_agent(table, 4242) == 0  # not in the table
+    assert owner.is_ancestor(table, 11183, 700) and not owner.is_ancestor(table, 700, 11183)
+    assert not owner.is_ancestor(table, 11183, 11183)
+
+
+def test_nested_agent_hooks_are_ignored(settings):
+    from aaw_core.hooks import owner
+
+    table = _table(*NESTED)
+
+    def nested(pid, session, agent="claude"):
+        return owner.nested_agent(settings, "kids", agent, {"session_id": session}, table=table, pid=pid)
+
+    assert nested(500, "own-1") == ""  # the first agent to speak owns the session
+    assert json.loads(owner.owner_file(settings, "kids").read_text()) == {
+        "pid": 11183, "start": START, "sessions": ["own-1"]}
+    assert "pid 700 (claude)" in nested(800, "child-1")  # the script's claude -p
+    assert nested(500, "own-2") == ""  # the owner after /clear: a new conversation id
+    assert nested(500, "own-1") == "" and nested(500, "own-2") == ""
+    assert "session child-2" in nested(800, "child-2")
+    # A helper process of the owner that reports the owner's conversation is the owner.
+    assert nested(800, "own-2") == ""
+    # Agents whose process layout was never checked keep the old behavior.
+    for unchecked in ("codex", "gemini", "grok", "cursor", "scoot"):
+        assert nested(800, "child-3", agent=unchecked) == ""
+    # No session id in the payload: not enough to call it nested.
+    assert owner.nested_agent(settings, "kids", "claude", {}, table=table, pid=800) == ""
+
+
+def test_nested_agent_owner_changes(settings):
+    from aaw_core.hooks import owner
+
+    def nested(table, pid, session):
+        return owner.nested_agent(settings, "kids", "claude", {"session_id": session}, table=table, pid=pid)
+
+    # Upgrade mid-turn: the nested agent spoke first and was taken for the owner; the real
+    # owner's next hook takes the session back.
+    table = _table(*NESTED)
+    assert nested(table, 800, "child-1") == ""
+    assert nested(table, 500, "own-1") == ""
+    assert json.loads(owner.owner_file(settings, "kids").read_text())["pid"] == 11183
+    assert nested(table, 800, "child-1") != ""
+    # The session restarted: the remembered owner is gone, or its pid belongs to a process
+    # with another start time. The new agent owns the session.
+    restarted = _table((1, 0, "/sbin/launchd"), (21181, 1, "zsh"), (21183, 21181, "claude"), (900, 21183, "python3"))
+    assert nested(restarted, 900, "new-1") == ""
+    assert json.loads(owner.owner_file(settings, "kids").read_text())["pid"] == 21183
+    reused = {**restarted, 21183: (21181, "Sun Nov 15 09:00:00 2026", "claude")}
+    assert nested(reused, 900, "new-2") == ""
+    assert json.loads(owner.owner_file(settings, "kids").read_text())["sessions"] == ["new-2"]
+    # ps unreadable: nothing is dropped.
+    assert nested({}, 900, "whatever") == ""
+
+
+def test_process_table_reads_this_process():
+    from aaw_core.hooks import owner
+
+    table = owner.process_table()
+    parent, start, command = table[os.getpid()]
+    assert parent == os.getppid() and len(start.split()) == 5 and command
+
+
+def test_preamble_drops_a_nested_agents_hook(monkeypatch, settings):
+    from aaw_core.hooks import owner
+
+    monkeypatch.setenv("AAW_STATE_DIR", str(settings.state_dir))
+    monkeypatch.setenv("AAW_PROJECT", "kids")
+    monkeypatch.setenv("AAW_AGENT", "claude")
+    settings.enabled_flag.parent.mkdir(parents=True, exist_ok=True)
+    settings.enabled_flag.write_text("")
+    monkeypatch.setattr("sys.stdin", io.StringIO('{"session_id": "child-1"}'))
+    monkeypatch.setattr(owner, "nested_agent", lambda *a, **k: "pid 700 (claude)")
+    with pytest.raises(SystemExit) as e:
+        common.preamble()
+    assert e.value.code == 0
+    assert "ignored" in (settings.logs_dir / "nested.log").read_text()
+    common.read_payload()  # leave no cached payload behind for the next test
