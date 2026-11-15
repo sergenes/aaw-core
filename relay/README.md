@@ -51,6 +51,9 @@ computers(computer_id PK, doc)
 `payload` and `doc` hold the documents as the devices wrote them: every sensitive field inside is ciphertext.
 A phone row with a non-empty `scope` is a guest token for that one session (store version 4, aaw-core 0.1.13): the owner's phone minted it with `share`, and the relay accepts it only for that session's frames, forwards and pushes it only that session's traffic, and refuses `request` and `project_delete` from it.
 `label_enc` is the owner's name for the guest, encrypted by the owner's phone.
+Since 0.1.16 the relay names a guest as the sender of what it writes: its commands are stored and forwarded with `from` (the share id), `from_label_enc` and `from_platform`, fields a phone cannot set itself.
+A guest's file requests (`fs_browse`, `fs_fetch`, `fs_attach`) are forwarded to the computer as `guest_<kind>` with `scope`, and the computer fences them to the shared session's folder; the response goes back to that guest alone.
+Deploy the relay before the engines and phones that use either: it keeps serving older engines and phones unchanged, and an engine older than 0.1.16 refuses a guest's file request as an unknown kind.
 
 ## Capacity
 

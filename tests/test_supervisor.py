@@ -336,3 +336,97 @@ def test_stop_request_writes_stopped_right_away(sup, monkeypatch):
     assert sup.handle_request("stop_session", {"project_id": "proj"}) == {"result": "stopped", "session_id": "proj"}
     pid, fields = sup.transport.project_writes[-1]
     assert pid == "proj" and fields["status"] == "stopped" and fields["pending_question_id"] == ""
+
+
+# ── 0.1.16: a guest's file requests are fenced to the shared session's folder ──
+
+
+@pytest.fixture
+def shared(sup):
+    """A session at home/proj shared with a guest; home/secret.md is the owner's."""
+    proj = sup.home / "proj"
+    (proj / "docs").mkdir(parents=True)
+    (proj / "readme.md").write_text("shared")
+    (proj / "docs" / "plan.md").write_text("plan")
+    (sup.home / "secret.md").write_text("private")
+    (proj / "way-out").symlink_to(sup.home)
+    (proj / "leak.md").symlink_to(sup.home / "secret.md")
+    sup.transport.projects = {"proj": {"status": "running", "agent": "claude",
+                                       "project_path": encrypt(str(proj), KEY)}}
+    sup.proj = proj
+    return sup
+
+
+def enc(path) -> dict:
+    return {"path_enc": encrypt(str(path), KEY)}
+
+
+def test_a_guest_browses_the_shared_folder_and_nothing_above_it(shared):
+    root = shared.handle_guest_request("fs_browse", {}, "proj")
+    assert root["error"] == "" and root["at_root"] and root["parent_enc"] is None
+    assert decrypt(root["resolved_path_enc"], KEY) == fs.canon(str(shared.proj))
+    assert "docs" in [decrypt(e["name_enc"], KEY) for e in root["entries"]]
+    inside = shared.handle_guest_request("fs_browse", enc(shared.proj / "docs"), "proj")
+    assert inside["error"] == "" and not inside["at_root"]
+    assert decrypt(inside["parent_enc"], KEY) == fs.canon(str(shared.proj))
+    # the owner's home, the parent, and a link that leaves the folder are all outside
+    for path in (shared.home, shared.proj.parent, shared.proj / "way-out", "/"):
+        assert shared.handle_guest_request("fs_browse", enc(path), "proj")["error"] == fs.ERR_OUTSIDE_ROOTS
+    # the owner still browses from home
+    assert decrypt(shared.handle_request("fs_browse", {})["resolved_path_enc"], KEY) == fs.canon(str(shared.home))
+
+
+def test_a_guest_fetches_files_inside_the_shared_folder_only(shared):
+    reply = shared.handle_guest_request("fs_fetch", enc(shared.proj / "docs" / "plan.md"), "proj")
+    assert reply["error"] == "" and base64.b64decode(decrypt(reply["chunks"][0], KEY)) == b"plan"
+    for path in (shared.home / "secret.md", shared.proj / "leak.md", shared.proj / "way-out" / "secret.md"):
+        reply = shared.handle_guest_request("fs_fetch", enc(path), "proj")
+        assert reply == {"error": fs.ERR_OUTSIDE_ROOTS, "total_chunks": 0}
+    assert shared.handle_request("fs_fetch", enc(shared.home / "secret.md"))["error"] == ""  # the owner may
+
+
+def test_a_guest_of_no_known_session_is_denied(shared):
+    for scope in ("ghost", "", None, ["proj"]):
+        assert shared.handle_guest_request("fs_browse", {}, scope) == {"error": fs.ERR_DENIED}
+        assert shared.handle_guest_request("fs_fetch", enc(shared.proj / "readme.md"), scope) == {
+            "error": fs.ERR_DENIED, "total_chunks": 0}
+    # a session whose folder is gone, or whose path this key cannot read
+    shared.transport.projects["gone"] = {"project_path": encrypt(str(shared.home / "nope"), KEY)}
+    shared.transport.projects["foreign"] = {"project_path": encrypt(str(shared.proj), generate_key_b64())}
+    for scope in ("gone", "foreign"):
+        assert shared.handle_guest_request("fs_browse", {}, scope) == {"error": fs.ERR_DENIED}
+
+
+def test_a_guest_cannot_reach_session_requests_through_the_guest_door(shared, monkeypatch):
+    launched = []
+    monkeypatch.setattr(shared, "_launch", lambda *a, **k: launched.append(a) or {"result": "started"})
+    for kind in ("new_session", "start_session", "stop_session", "nope"):
+        assert shared.handle_guest_request(kind, enc(shared.proj), "proj") == {"error": "unknown_request"}
+    assert launched == []
+
+
+def test_serve_requests_routes_a_guest_request_by_its_scope(shared, monkeypatch):
+    import queue as q
+
+    monkeypatch.setattr(fs, "RAW_CHUNK", 2)
+    shared.transport.requests = q.Queue()
+    shared.transport.responses = []
+    shared.transport.requests.put({"req": "g1", "kind": "guest_fs_browse", "scope": "proj", "payload": {}})
+    shared.transport.requests.put({"req": "g2", "kind": "guest_fs_browse", "payload": {}})  # no scope: no folder
+    shared.transport.requests.put({"req": "g3", "kind": "guest_fs_fetch", "scope": "proj",
+                                   "payload": {**enc(shared.proj / "docs" / "plan.md"), "parts": True}})
+    shared.transport.requests.put({"req": "g4", "kind": "guest_new_session", "scope": "proj", "payload": {}})
+    shared.serve_requests()
+    by_req: dict[str, list] = {}
+    for req, payload in shared.transport.responses:
+        by_req.setdefault(req, []).append(payload)
+    assert decrypt(by_req["g1"][0]["resolved_path_enc"], KEY) == fs.canon(str(shared.proj))
+    assert by_req["g2"] == [{"error": fs.ERR_DENIED}]
+    assert [p["part"] for p in by_req["g3"]] == [0, 1]
+    assert by_req["g4"] == [{"error": "unknown_request"}]
+
+
+def test_a_guests_attachment_is_saved_like_any_phones(shared):
+    data = base64.b64encode(b"\x89PNG fake").decode()
+    reply = shared.handle_guest_request("fs_attach", {"suffix": ".png", "chunks": [encrypt(data, KEY)]}, "proj")
+    assert reply["error"] == "" and Path(decrypt(reply["path_enc"], KEY)).read_bytes() == b"\x89PNG fake"
