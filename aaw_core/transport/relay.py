@@ -44,6 +44,7 @@ from aaw_core.transport.base import (
     make_event,
     now_ms,
     select_deliverable,
+    sender_of,
 )
 
 _REQUEST_TIMEOUT = 15.0
@@ -279,6 +280,13 @@ class RelayTransport:
     def decrypt_field(self, value: str) -> str:
         return decrypt_field(value, self._enc_key)
 
+    def sender_of(self, doc: dict, prefix: str = "from") -> dict:
+        """The feed fields for the guest who sent a command (``sender_of`` in base)."""
+        return sender_of(doc or {}, self._enc_key, prefix)
+
+    def expect_typed(self, typed: str, payload: dict | None) -> None:
+        self._log.expect_typed(typed, payload)
+
     def has_local_log(self) -> bool:
         return self._log.exists()
 
@@ -361,16 +369,27 @@ class RelayTransport:
 
     # ── events ────────────────────────────────────────────────────────────────
 
-    def write_event(self, event_type: str, payload: dict, via: str | None = None) -> str:
+    def write_event(self, event_type: str, payload: dict, via: str | None = None, typed: str | None = None) -> str:
         """Record an event in the local log and send it to the relay. ``via`` names the
         writer of a user message (``daemon`` or ``hook``) so a prompt both report lands in
-        the feed once; see ``LocalLog.append_user_message_once``."""
+        the feed once; see ``LocalLog.append_user_message_once``. ``typed`` is the text
+        that went into the pane when it is not the content (a guest's prompt goes in
+        behind a note of who wrote it); a writer that does not pass it, the hook, gets
+        the entry the daemon noted for that text (``expect_typed``), so the feed entry is
+        the same whichever of them is first."""
         if (event_type == "notification" and payload.get("level") in PUSHABLE_NOTIFICATION_LEVELS
                 and not self._notif_limiter.allow()):
             print(f"[relay] rate limit: notification dropped (level={payload.get('level')})", flush=True)
             return ""
+        echo = bool(via) and event_type == "message" and payload.get("role") == "user"
+        if echo and typed is None:
+            noted = self._log.expected(payload.get("content", ""), via)
+            if noted:
+                typed, payload = payload.get("content", ""), noted
         stored, entry = make_event(event_type, payload, self._enc_key)
-        if via and event_type == "message" and payload.get("role") == "user":
+        if echo:
+            if typed and typed != entry.get("content"):
+                entry["typed"] = typed  # local only: what the two writers are matched on
             if not self._log.append_user_message_once(entry, via):
                 return ""  # the other writer already recorded this prompt
         else:
@@ -451,7 +470,7 @@ class RelayTransport:
         if answer:
             # via="daemon": a free-text answer is typed into the pane, so the agent's
             # prompt hook reports it too, and the two must land as one feed entry.
-            self.write_event("message", {"role": "user", "content": answer}, via="daemon")
+            self.write_event("message", {"role": "user", "content": answer, **self.sender_of(doc)}, via="daemon")
         return answer
 
     def poll_answer(self, deadline: float) -> str | None:

@@ -9,7 +9,10 @@ class _Transport:
     def __init__(self):
         self.events: list[tuple[str, dict]] = []
 
-    def write_event(self, event_type, payload, via=None):
+    def expect_typed(self, typed, payload):
+        pass
+
+    def write_event(self, event_type, payload, via=None, typed=None):
         self.events.append((event_type, payload))
 
     def write_notification(self, message, level="info", set_running=False):

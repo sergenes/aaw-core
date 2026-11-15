@@ -42,6 +42,10 @@ SLOW_DUTY_S = 2.0  # a watchdog duty slower than this is logged, so a slow relay
 # Requests that start or stop a daemon share the session lock with the watchdog's duties;
 # the file requests do not touch sessions and are answered at once, whatever the duties do.
 SESSION_REQUESTS = frozenset({"start_session", "stop_session", "new_session"})
+# A guest of a shared session asks under these kinds (the relay renames its request and
+# adds `scope`, the session): the files are fenced to that session's folder.
+GUEST_PREFIX = "guest_"
+GUEST_FILE_REQUESTS = frozenset({"fs_browse", "fs_fetch", "fs_attach"})
 SUPERVISOR_PROJECT = "_supervisor"  # its own channel on the relay; never a session id
 MEMORY_PRESSURE_NOTICE = ("{name} is critically low on memory: agent sessions may freeze "
                           "or be killed. Close heavy apps (emulators, simulators, browsers) "
@@ -275,7 +279,9 @@ class Supervisor:
             block = False  # only the first get waits; the rest drain what is there
             payload = frame.get("payload") or {}
             kind = frame.get("kind") or ""
-            if kind in SESSION_REQUESTS:
+            if kind.startswith(GUEST_PREFIX):
+                reply = self.handle_guest_request(kind[len(GUEST_PREFIX):], payload, frame.get("scope"))
+            elif kind in SESSION_REQUESTS:
                 with self.session_lock:
                     reply = self.handle_request(kind, payload)
             else:
@@ -304,6 +310,35 @@ class Supervisor:
             return handler(payload or {})
         except Exception as e:  # noqa: BLE001 - one bad request must not take the supervisor down
             self.log(f"request {kind} failed: {e}")
+            return {"error": "error"}
+
+    def guest_folder(self, scope) -> str | None:
+        """The folder of the session a guest was invited to, or None when there is no such
+        session here or its folder cannot be read or is gone."""
+        if not scope or not isinstance(scope, str):
+            return None
+        if scope not in self.cache:
+            self.refresh_cache()
+        path = (self.cache.get(scope) or {}).get("path")
+        return path if path and Path(path).is_dir() else None
+
+    def handle_guest_request(self, kind: str, payload: dict, scope) -> dict:
+        """A file request from a guest of one session: browsing and fetching see that
+        session's folder and nothing above or beside it (a link that leaves it is outside
+        too, the fence compares real paths). An attachment is written where every phone's
+        goes; the guest already holds the session it is for."""
+        if kind not in GUEST_FILE_REQUESTS:
+            return {"error": "unknown_request"}
+        if kind == "fs_attach":
+            return self.handle_request(kind, payload)
+        folder = self.guest_folder(scope)
+        if folder is None:
+            self.log(f"guest {kind} refused: no folder for session {scope!r}")
+            return {"error": fs.ERR_DENIED, "total_chunks": 0} if kind == "fs_fetch" else {"error": fs.ERR_DENIED}
+        try:
+            return (self.req_fs_browse if kind == "fs_browse" else self.req_fs_fetch)(payload or {}, [folder])
+        except Exception as e:  # noqa: BLE001 - one bad request must not take the supervisor down
+            self.log(f"guest request {kind} failed: {e}")
             return {"error": "error"}
 
     def req_start_session(self, payload: dict) -> dict:
@@ -380,14 +415,14 @@ class Supervisor:
             return {"result": "error"}
         return {"result": "started", "session_id": pid}
 
-    def req_fs_browse(self, payload: dict) -> dict:
+    def req_fs_browse(self, payload: dict, roots: list[str] | None = None) -> dict:
         if not self.enc_key:
             return {"error": fs.ERR_DENIED}  # names cannot leave the computer unencrypted
         path_enc = payload.get("path_enc")
         path = self.decrypt(path_enc) if path_enc else None
         if path_enc and not path:
             return {"error": fs.ERR_DENIED}  # ciphertext this key cannot read: not "home"
-        res = fs.list_dir(path, self.settings.browse_roots)
+        res = fs.list_dir(path, roots or self.settings.browse_roots)
         entries = []
         for e in res["entries"]:
             row = {"name_enc": self.encrypt(e["name"]), "kind": e["kind"], "is_repo": e["is_repo"]}
@@ -400,7 +435,7 @@ class Supervisor:
             "at_root": res["at_root"], "entries": entries, "truncated": res["truncated"], "error": res["error"],
         }
 
-    def req_fs_fetch(self, payload: dict) -> dict:
+    def req_fs_fetch(self, payload: dict, roots: list[str] | None = None) -> dict:
         if not self.enc_key:
             return {"error": fs.ERR_DENIED, "total_chunks": 0}
         path = self.decrypt(payload.get("path_enc") or "")
@@ -414,7 +449,7 @@ class Supervisor:
             max_px = int(payload.get("max_px") or 0)  # a rendition to look at, not the original
         except (TypeError, ValueError):
             max_px = 0
-        res = fs.fetch_file(path, self.settings.browse_roots,
+        res = fs.fetch_file(path, roots or self.settings.browse_roots,
                             max_bytes=fs.MAX_FETCH_PARTS_BYTES if in_parts else None, max_px=max_px)
         if res["error"]:
             return {"error": res["error"], "total_chunks": 0}

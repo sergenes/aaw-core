@@ -37,6 +37,7 @@ from aaw_core.hooks.on_stop_cursor import response_from_transcript as cursor_res
 from aaw_core.hooks.on_subagent import reconcile_subagents, update_subagents
 from aaw_core.host import detect, tmux, usage
 from aaw_core.host.identity import load_identity
+from aaw_core.transport.base import typed_for
 from aaw_core.transport.relay import RelayTransport
 
 UNDELIVERED_NOTICE = ("Your message did not reach the session (tmux was unresponsive). "
@@ -100,41 +101,59 @@ def stale_notice(cmd: dict, now_s: float | None = None) -> str | None:
 
 
 def forward_text(transport: RelayTransport, session: str, agent: str, text: str,
-                 turn_watch: dict | None = None, command_id: str | None = None) -> None:
+                 turn_watch: dict | None = None, command_id: str | None = None,
+                 sender: dict | None = None) -> bool:
     """Type a message into the agent and echo it to the feed once it was actually
     delivered; otherwise say so, so the user resends instead of waiting. The echo names
     the command it delivered, so a phone can match its own prompt to the echo by id
-    instead of by text (two prompts saying "continue" are two rows, not one)."""
-    if tmux.send_text(text, session, agent):
-        payload = {"role": "user", "content": text, "agent": agent}
-        if command_id:
-            payload["command_id"] = command_id
-        transport.write_event("message", payload, via="daemon")
+    instead of by text (two prompts saying "continue" are two rows, not one).
+
+    ``sender`` is the guest who wrote it in a shared session (``transport.sender_of``),
+    empty for the owner. The agent reads a guest's prompt behind "[from guest Anna]";
+    the feed shows the text as written, with the sender next to it. True when delivered."""
+    typed = typed_for(text, sender)
+    payload = {"role": "user", "content": text, "agent": agent, **(sender or {})}
+    if command_id:
+        payload["command_id"] = command_id
+    # The agent's prompt hook reports the same prompt and may be first: it writes this entry.
+    transport.expect_typed(typed, payload)
+    if tmux.send_text(typed, session, agent):
+        transport.write_event("message", payload, via="daemon", typed=typed)
         if turn_watch is not None:
             # Watched by the main loop: a prompt the agent refuses without starting a
             # turn (out of usage credits) must reach the phone as an error.
-            turn_watch["text"], turn_watch["ts"] = text, time.monotonic()
-        return
+            turn_watch["text"], turn_watch["ts"] = typed, time.monotonic()
+        return True
+    transport.expect_typed(typed, None)
     log(f"message NOT delivered after {tmux.SEND_ATTEMPTS} attempts: {text[:60]!r}", err=True)
+    return False
+
+
+def report_undelivered(transport: RelayTransport) -> None:
     try:
         transport.write_notification(UNDELIVERED_NOTICE, level="error")
     except Exception as e:  # noqa: BLE001
         log(f"could not post the undelivered notice: {e}", err=True)
 
 
+# The project document fields naming who queued a message behind an open dialog.
+PENDING_SENDER = ("pending_from", "pending_from_label_enc", "pending_from_platform")
+
+
 def flush_pending_message(transport: RelayTransport, session: str, agent: str) -> None:
     """Send a message queued while a dialog was open (opportunistic takeover). Called
     after every answer path; a failed send leaves it queued for the next flush point."""
     try:
-        queued = project_doc(transport).get("pending_message", "")
+        doc = project_doc(transport)
+        # Fail-soft: a daemon before 0.1.16 queued it in the clear.
+        queued = transport.decrypt_field(doc.get("pending_message", "") or "")
         if not queued:
             return
         time.sleep(0.3)  # let the prompt clear from the pane
-        if not tmux.send_text(queued, session, agent):
+        if not forward_text(transport, session, agent, queued, sender=transport.sender_of(doc, "pending_from")):
             log(f"pending message not delivered, keeping it queued: {queued[:50]}", err=True)
             return
-        transport.write_event("message", {"role": "user", "content": queued, "agent": agent}, via="daemon")
-        transport.update_project(pending_message="")
+        transport.update_project(pending_message="", **dict.fromkeys(PENDING_SENDER, ""))
         log(f"flushed the pending message: {queued[:50]}")
     except Exception as e:  # noqa: BLE001
         log(f"pending message flush failed: {e}", err=True)
@@ -209,7 +228,12 @@ def handle_command(cmd: dict, transport: RelayTransport, settings: Settings, *, 
     if command == "text" and args and not args.startswith("/"):
         try:
             if detect.dialog_is_open(tmux.visible_pane(session), agent):
-                transport.update_project(pending_message=args)
+                # Encrypted, as the contract says: the relay must not hold a prompt in the
+                # clear (it did until 0.1.16). With its sender, as the relay stamped the
+                # command, for the echo later.
+                transport.update_project(pending_message=transport.encrypt_field(args), **{
+                    field: cmd.get(src) or "" for field, src in zip(
+                        PENDING_SENDER, ("from", "from_label_enc", "from_platform"), strict=True)})
                 log("a prompt is open; message queued until it is answered")
                 return
         except Exception as e:  # noqa: BLE001
@@ -248,6 +272,11 @@ def handle_command(cmd: dict, transport: RelayTransport, settings: Settings, *, 
         transport.write_event("message", {"role": "assistant",
                                           "content": f"Session '{session}' is {'running' if running else 'not running'}."})
 
+    def deliver() -> None:
+        if not forward_text(transport, session, agent, args, turn_watch, command_id=cmd.get("id"),
+                            sender=transport.sender_of(cmd)):
+            report_undelivered(transport)
+
     if command == "text":
         if args.startswith("/restart"):
             restart()
@@ -259,10 +288,10 @@ def handle_command(cmd: dict, transport: RelayTransport, settings: Settings, *, 
             usage.fetch_usage(transport, project_dir, agent)
         else:
             transport.set_project_status("running")
-            forward_text(transport, session, agent, args, turn_watch, command_id=cmd.get("id"))
+            deliver()
     elif command in ("btw", "prompt"):  # legacy
         transport.set_project_status("running")
-        forward_text(transport, session, agent, args, turn_watch, command_id=cmd.get("id"))
+        deliver()
     elif command == "restart":
         restart()
     elif command == "stop":

@@ -57,9 +57,23 @@ seen recently cannot be claimed by a new token; only an id idle beyond
 A phone token may be scoped to one session (``devices.scope``, a project_id): a guest
 the owner's phone invited with ``share``. A scoped socket is accepted only for frames
 that carry its project id, its ``projects`` listing holds that one project, and
-``request`` (browse, fetch, start a session) and ``project_delete`` are refused; it
-is forwarded and pushed only that session's traffic (plus the computer document).
+``project_delete`` and every ``request`` that starts or stops a session are refused;
+it is forwarded and pushed only that session's traffic (plus the computer document).
 Only an unscoped phone may mint, list or revoke guests.
+
+Since 0.1.16 a guest may make the file requests (``fs_browse``, ``fs_fetch``,
+``fs_attach``). The relay cannot judge a path, they cross it encrypted, so the fence is
+the computer's: the request reaches it as ``guest_<kind>`` with ``scope`` (the guest's
+project id) and the engine serves only that session's folder. An older engine does
+not know the kind and refuses it. The response returns to the guest that asked, alone.
+
+Also since 0.1.16 the relay names the sender: a guest's ``command`` is stored and
+forwarded with ``from`` (its share id), ``from_label_enc`` (the label its owner gave
+it) and ``from_platform``; the owner's carry none, and whatever a phone puts in those
+fields itself is dropped. A ``command_update`` that rewrites the prompt (``payload``)
+moves the sender to whoever wrote it, and a ``pending_message`` set through ``state``
+is stamped the same way with ``pending_from``, ``pending_from_label_enc`` and
+``pending_from_platform``.
 
 Abuse limits (the ``Abuse limits`` constants): incoming frames are capped in size
 and per-connection rate, a socket must say hello within a deadline, history
@@ -155,6 +169,21 @@ PHONE_STATE_FIELDS = {"auto_approve", "pending_message"}
 # The frames a session-scoped guest may send, each checked against its project_id.
 GUEST_SESSION_FRAMES = frozenset({"subscribe", "ack", "history", "commands", "command", "command_update",
                                   "command_delete", "project", "state"})
+
+# The requests a guest may make (0.1.16). Each reaches the computer under its own kind,
+# `guest_<kind>`, with `scope`, the guest's session: an engine older than 0.1.16 does not
+# know the kind and answers `unknown_request`, so it can never serve a guest the whole
+# computer by ignoring a field it has not heard of.
+GUEST_REQUEST_KINDS = frozenset({"fs_browse", "fs_fetch", "fs_attach"})
+GUEST_REQUEST_PREFIX = "guest_"
+GUEST_REQUEST_TTL_S = 120.0          # how long a guest's request waits for its response frames
+GUEST_REQUESTS_OPEN_MAX = 64         # per guest socket; the oldest is forgotten past that
+
+# Who sent a command (0.1.16). The relay writes these, never a phone: a guest's command
+# carries its share id, the label its owner gave it and its platform; the owner's carry none.
+SENDER_FIELDS = ("from", "from_label_enc", "from_platform")
+# The same for a message a guest queued behind an open dialog (the project document).
+PENDING_SENDER_FIELDS = ("pending_from", "pending_from_label_enc", "pending_from_platform")
 
 # ── Abuse limits ─────────────────────────────────────────────────────────────
 # The relay is internet-facing and registration is trust on first use, so every limit
@@ -273,6 +302,9 @@ def _sees(conn: Conn, frame: dict) -> bool:
 class Relay:
     def __init__(self, db_path: str, push: PushSender | None = None):
         self.db_path = db_path
+        # A guest's request in flight: the id the relay forwarded it under -> (the guest's
+        # socket id, the guest's own req, the kind it asked for, when it lapses).
+        self._guest_requests: dict[str, tuple[str, str, str, float]] = {}
         self.push: PushSender = push or NullPushSender()
         self.db: aiosqlite.Connection | None = None
         self.write_lock = asyncio.Lock()
@@ -662,10 +694,13 @@ class Relay:
     @staticmethod
     def _guest_may(conn: Conn, kind: str, frame: dict) -> bool:
         """What a session-scoped guest may send: its own session's frames, the computer
-        document, pings and its own unlink. Never a `request` (browse, fetch, start or stop
-        a session), a `project_delete`, or the sharing frames."""
+        document, pings, its own unlink, and the file requests the computer fences to the
+        shared folder (GUEST_REQUEST_KINDS). Never a request that starts or stops a
+        session, a `project_delete`, or the sharing frames."""
         if kind in ("ping", "forget_phone", "computer", "projects"):
             return True
+        if kind == "request":
+            return isinstance(frame.get("kind"), str) and frame["kind"] in GUEST_REQUEST_KINDS
         if kind in GUEST_SESSION_FRAMES:
             return frame.get("project_id") == conn.scope
         return False
@@ -799,6 +834,8 @@ class Relay:
             fields = {k: v for k, v in fields.items() if k in PHONE_STATE_FIELDS}
             if not fields:
                 return
+            if "pending_message" in fields:  # who queued it, for the echo once it is typed
+                fields.update(await self._sender(conn, PENDING_SENDER_FIELDS))
         await self._merge_doc("projects", "computer_id=? AND project_id=?", (conn.computer_id, project_id), fields,
                               "INSERT OR REPLACE INTO projects(computer_id, project_id, doc) VALUES(?,?,?)")
         await self._forward(conn.computer_id, {"type": "state", "project_id": project_id, "fields": fields},
@@ -911,11 +948,28 @@ class Relay:
         self._stored_bytes.pop(conn.computer_id, None)
         await self._forward(conn.computer_id, {"type": "project_delete", "project_id": project_id}, exclude=conn.id)
 
+    async def _sender(self, conn: Conn, names: tuple[str, str, str] = SENDER_FIELDS) -> dict:
+        """The sender fields for something this socket wrote: a guest's share id, label
+        and platform; for the owner's phone the same fields emptied, so a merge clears
+        whatever a guest left there. The relay knows the token behind the socket, so a
+        guest cannot pose as the owner or as another guest."""
+        who, label, platform = names
+        if not conn.scope:
+            return {who: "", label: "", platform: ""}
+        row = await self._fetchone("SELECT label_enc, platform FROM devices WHERE token=?", (conn.token,))
+        return {who: conn.token[:SHARE_ID_LEN], label: (row["label_enc"] or "") if row else "",
+                platform: (row["platform"] or "") if row else ""}
+
     async def _on_command(self, conn: Conn, frame: dict) -> None:
         project_id, doc = frame["project_id"], frame["command"]
         if _bad_str(project_id, "project_id") or _bad_str(doc.get("id"), "event_id"):
             await conn.send({"type": "error", "message": "invalid command"})
             return
+        if conn.role == "phone":
+            # What a phone claims about the sender is dropped; a guest's command is stamped.
+            doc = {k: v for k, v in doc.items() if k not in SENDER_FIELDS}
+            if conn.scope:
+                doc.update({k: v for k, v in (await self._sender(conn)).items() if v})
         doc_json = json.dumps(doc)
         # Commands share the computer's storage budget (review R02: they had none, and a
         # registered computer could fill the relay's disk with them), and only so many
@@ -940,6 +994,13 @@ class Relay:
                                    (command_id, conn.computer_id))
         if row is None or (conn.scope and row["project_id"] != conn.scope):
             return
+        if conn.role == "phone":
+            # The sender follows whoever last wrote the prompt itself: a guest who edits a
+            # queued prompt becomes its sender, the owner editing a guest's takes it back,
+            # and a change of time or status leaves the sender alone.
+            fields = {k: v for k, v in fields.items() if k not in SENDER_FIELDS}
+            if "payload" in fields:
+                fields.update(await self._sender(conn))
         doc = json.loads(row["doc"])
         doc.update(fields)
         doc_json = json.dumps(doc)
@@ -1040,20 +1101,49 @@ class Relay:
     async def _on_request(self, conn: Conn, frame: dict) -> None:
         """A phone asks the computer for something only the computer can do. Live-only:
         with no computer socket the relay answers on its behalf, so the phone never
-        waits on a request nobody will see."""
+        waits on a request nobody will see.
+
+        A guest's request (a file request; `_guest_may` refused the rest) is forwarded as
+        `guest_<kind>` with `scope` and under an id of the relay's own, so its response
+        returns to that guest alone and a guest cannot aim at another phone's request id."""
         if conn.role != "phone":
             return
-        out = {"type": "request", "req": frame.get("req"), "kind": frame.get("kind"),
-               "payload": frame.get("payload") or {}}
+        req, kind = frame.get("req"), frame.get("kind")
+        out = {"type": "request", "req": req, "kind": kind, "payload": frame.get("payload") or {}}
+        if conn.scope:
+            out["req"] = self._track_guest_request(conn, req, kind)
+            out["kind"], out["scope"] = GUEST_REQUEST_PREFIX + kind, conn.scope
         if await self._forward(conn.computer_id, out, role="computer") == 0:
-            await conn.send({"type": "response", "req": frame.get("req"), "kind": frame.get("kind"),
-                             "payload": {"error": "offline"}})
+            self._guest_requests.pop(out["req"], None)
+            await conn.send({"type": "response", "req": req, "kind": kind, "payload": {"error": "offline"}})
+
+    def _track_guest_request(self, conn: Conn, req, kind: str) -> str:
+        now = time.monotonic()
+        for key in [k for k, v in self._guest_requests.items() if v[3] < now]:
+            del self._guest_requests[key]
+        mine = [k for k, v in self._guest_requests.items() if v[0] == conn.id]
+        for key in mine[:max(0, len(mine) + 1 - GUEST_REQUESTS_OPEN_MAX)]:
+            del self._guest_requests[key]
+        relay_req = "g-" + uuid.uuid4().hex
+        self._guest_requests[relay_req] = (conn.id, req, kind, now + GUEST_REQUEST_TTL_S)
+        return relay_req
 
     async def _on_response(self, conn: Conn, frame: dict) -> None:
         if conn.role != "computer":
             return
+        payload = frame.get("payload") or {}
+        tracked = self._guest_requests.get(frame.get("req") or "")
+        if tracked is not None:
+            # A guest's answer goes to the socket that asked, under the id and kind it
+            # used. A file may arrive as several frames, so the entry stays until it lapses.
+            conn_id, req, kind, _ = tracked
+            self._guest_requests[frame["req"]] = (conn_id, req, kind, time.monotonic() + GUEST_REQUEST_TTL_S)
+            guest = self.live.get(conn.computer_id, {}).get(conn_id)
+            if guest is not None:
+                await self._send_to(guest, {"type": "response", "req": req, "kind": kind, "payload": payload})
+            return
         await self._forward(conn.computer_id, {"type": "response", "req": frame.get("req"),
-                                               "kind": frame.get("kind"), "payload": frame.get("payload") or {}},
+                                               "kind": frame.get("kind"), "payload": payload},
                             role="phone")
 
     async def _on_clear_events(self, conn: Conn, frame: dict) -> None:

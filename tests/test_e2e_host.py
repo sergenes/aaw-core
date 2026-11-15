@@ -352,3 +352,82 @@ def test_a_turn_that_dies_on_an_expired_login_tells_the_phone_once(host):
         phone.close()
     finally:
         reader.stop(flush_timeout=0)
+
+
+def test_a_guest_of_a_shared_session_is_named_and_fenced(host):
+    """0.1.16, both halves of sharing end to end: the owner's phone invites a guest, the
+    guest's prompt reaches the agent behind a note of who wrote it and the feed names
+    them, and the guest's file requests see the session's folder and nothing above it."""
+    import base64
+    import hashlib
+    import threading
+
+    from aaw_core.encryption import encrypt
+    from aaw_core.host.supervisor import Supervisor
+
+    settings, _ident, key, project, relay_url = host
+    (project / "notes.md").write_text("shared notes")
+    (project.parent / "private.md").write_text("the owner's")
+    sessions.start_session(settings, project, SESSION_ID, "claude")
+    session = tmux_session(SESSION_ID)
+    assert _poll_until(lambda: "fake claude ready" in tmux.visible_pane(session), timeout=15)
+
+    sup = Supervisor(settings)
+    assert sup.connect() and sup.transport.wait_connected(10)
+    threading.Thread(target=sup._serve_loop, daemon=True).start()
+    try:
+        assert _poll_until(lambda: (sup.transport.list_projects().get(SESSION_ID) or {}).get("project_path"),
+                           timeout=30)
+        owner = _phone_connect(relay_url, sup.transport.register_phone_token())
+        owner.send(json.dumps({"type": "subscribe", "project_id": SESSION_ID}))
+        owner.send(json.dumps({"type": "share", "req": "s", "project_id": SESSION_ID, "guest_token": "guest-token",
+                               "label_enc": encrypt("Anna", key)}))
+        share_id = _recv_until(owner, lambda f: f.get("type") == "shares")["shares"][0]["id"]
+        assert share_id == hashlib.sha256(b"guest-token").hexdigest()[:16]  # a guest can tell which is its own
+        guest = _phone_connect(relay_url, "guest-token")
+
+        def message_on_owner():
+            return _recv_until(owner, lambda f: f.get("type") == "event" and f["event"]["type"] == "message",
+                               timeout=30)["event"]["payload"]
+
+        # the guest's prompt: the agent reads who wrote it, the feed shows the text and the name
+        guest.send(json.dumps({"type": "command", "project_id": SESSION_ID,
+                               "command": make_command("fix the test", key, source="phone")}))
+        assert _poll_until(lambda: "you said: [from guest Anna] fix the test" in tmux.visible_pane(session),
+                           timeout=30)
+        echo = message_on_owner()
+        assert decrypt(echo["content"], key) == "fix the test"
+        assert echo["from"] == share_id and decrypt(echo["from_label"], key) == "Anna"
+
+        # the owner's prompt is typed and echoed as it always was
+        owner.send(json.dumps({"type": "command", "project_id": SESSION_ID,
+                               "command": make_command("now mine", key, source="phone")}))
+        assert _poll_until(lambda: "you said: now mine" in tmux.visible_pane(session), timeout=30)
+        echo = message_on_owner()
+        assert decrypt(echo["content"], key) == "now mine" and "from" not in echo
+
+        # the guest browses: the root is the session's folder, with no way up
+        def ask(req: str, kind: str, payload: dict) -> dict:
+            guest.send(json.dumps({"type": "request", "req": req, "kind": kind, "payload": payload}))
+            reply = _recv_until(guest, lambda f: f.get("type") == "response" and f.get("req") == req, timeout=15)
+            assert reply["kind"] == kind
+            return reply["payload"]
+
+        root = ask("b1", "fs_browse", {})
+        assert root["error"] == "" and root["at_root"] and root["parent_enc"] is None
+        assert decrypt(root["resolved_path_enc"], key) == os.path.realpath(project)
+        assert [decrypt(e["name_enc"], key) for e in root["entries"]] == ["notes.md"]
+        assert ask("b2", "fs_browse", {"path_enc": encrypt(str(project.parent), key)})["error"] == "outside_roots"
+        got = ask("f1", "fs_fetch", {"path_enc": encrypt(str(project / "notes.md"), key)})
+        assert base64.b64decode(decrypt(got["chunks"][0], key)) == b"shared notes"
+        assert ask("f2", "fs_fetch", {"path_enc": encrypt(str(project.parent / "private.md"), key)}) == {
+            "error": "outside_roots", "total_chunks": 0}
+        # and still cannot start a session anywhere
+        guest.send(json.dumps({"type": "request", "req": "n1", "kind": "new_session",
+                               "payload": {"path_enc": encrypt(str(project.parent), key), "agent": "claude"}}))
+        assert _recv_until(guest, lambda f: f.get("req") == "n1")["type"] == "error"
+        owner.close()
+        guest.close()
+    finally:
+        sup.running = False
+        sup.transport.stop(flush_timeout=0)

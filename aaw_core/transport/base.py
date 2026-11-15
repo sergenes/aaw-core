@@ -20,11 +20,11 @@ import uuid
 from collections import deque
 from pathlib import Path
 
-from aaw_core.encryption import decrypt_if_encrypted, encrypt
+from aaw_core.encryption import decrypt_if_encrypted, encrypt, is_encrypted
 
 # Fields encrypted per event type. Everything else stays plaintext for routing and UI.
 SENSITIVE_FIELDS: dict[str, tuple[str, ...]] = {
-    "message": ("content",),
+    "message": ("content", "from_label"),
     "question": ("question", "context"),
     "notification": ("message",),
 }
@@ -106,6 +106,45 @@ def decrypt_event_entry(entry: dict, key_b64: str | None) -> dict:
         if out.get(field):
             out[field] = decrypt_field(out[field], key_b64)
     return out
+
+
+# ── Who sent it (a shared session) ───────────────────────────────────────────
+
+GUEST_LABEL_MAX = 40
+
+
+def sender_of(doc: dict, key_b64: str | None, prefix: str = "from") -> dict:
+    """The feed fields naming the guest who sent a command, or {} for the owner.
+
+    The relay stamps a guest's command with ``from`` (the share id), ``from_label_enc``
+    (the name its owner gave it, encrypted by the owner's phone) and ``from_platform``;
+    a phone cannot set them. A message queued behind a dialog carries the same on the
+    project document under ``pending_from``. In the feed they are ``from``,
+    ``from_label`` (encrypted like the text) and ``from_platform``."""
+    who = doc.get(prefix)
+    if not who or not isinstance(who, str):
+        return {}
+    out = {"from": who}
+    label = doc.get(f"{prefix}_label_enc")
+    label = decrypt_field(label, key_b64) if isinstance(label, str) else ""
+    if label and not is_encrypted(label):  # a label this key cannot read is no name
+        label = " ".join(label.replace("[", " ").replace("]", " ").split())[:GUEST_LABEL_MAX].strip()
+        if label:
+            out["from_label"] = label
+    platform = doc.get(f"{prefix}_platform")
+    if platform and isinstance(platform, str):
+        out["from_platform"] = platform
+    return out
+
+
+def typed_for(text: str, sender: dict | None) -> str:
+    """What is typed into the agent for a prompt: a guest's goes in behind a short note
+    of who wrote it, so the agent can tell the owner from a guest; the owner's, and
+    every slash command, exactly as written."""
+    if not sender or text.lstrip().startswith("/"):
+        return text
+    name = sender.get("from_label")
+    return f"[from guest {name}] {text}" if name else f"[from a guest] {text}"
 
 
 # ── Document shapes ──────────────────────────────────────────────────────────
@@ -197,6 +236,13 @@ def select_deliverable(commands: list[dict], key_b64: str | None, at_ms: int | N
 USER_ECHO_WINDOW_MS = 15_000
 
 
+def echo_key(entry: dict) -> str:
+    """What identifies a user message across its two writers: the text as it was typed
+    into the pane (``typed``, kept in the local log only, when it differs from what the
+    feed shows), else the content."""
+    return entry.get("typed") or entry.get("content", "")
+
+
 class LocalLog:
     """The plaintext per-session JSONL log that ``aaw feed`` renders.
 
@@ -205,6 +251,8 @@ class LocalLog:
 
     def __init__(self, sessions_dir: Path, project_id: str):
         self.path = sessions_dir / f"{project_id}.jsonl"
+        # Prompts the daemon is typing (see expect_typed). Not ".jsonl": that is a feed.
+        self.typed_path = sessions_dir / f"{project_id}.typed"
 
     def exists(self) -> bool:
         return self.path.exists()
@@ -218,10 +266,74 @@ class LocalLog:
             print(f"[transport] local log init failed: {e}", file=sys.stderr, flush=True)
 
     def delete(self) -> None:
+        for path in (self.path, self.typed_path):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    # ── prompts on their way into the pane ────────────────────────────────────
+    # The daemon knows things about a prompt the agent's prompt hook does not: the
+    # command it came from, the guest who sent it, and the text as written when what it
+    # types carries a "[from guest ...]" note. Whichever of the two reports the prompt
+    # first wins the feed entry, so the daemon says what it is about to type and both
+    # write the same entry.
+
+    def _typed_lines(self, f, since: int) -> list[dict]:
+        out = []
+        for line in f.read().splitlines():
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(e, dict) and int(e.get("ts", 0)) >= since:
+                out.append(e)
+        return out
+
+    def expect_typed(self, typed: str, payload: dict | None, window_ms: int = USER_ECHO_WINDOW_MS) -> None:
+        """Note the feed entry for a prompt about to be typed as ``typed``. With
+        ``payload`` None, withdraw the newest note for that text (it was not delivered)."""
         try:
-            self.path.unlink(missing_ok=True)
+            self.typed_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.typed_path.open("a+") as f:
+                fcntl.flock(f, fcntl.LOCK_EX)
+                try:
+                    f.seek(0)
+                    now = now_ms()
+                    notes = self._typed_lines(f, now - window_ms)
+                    if payload is None:
+                        for i in range(len(notes) - 1, -1, -1):
+                            if notes[i].get("typed") == typed:
+                                del notes[i]
+                                break
+                    else:
+                        notes.append({"ts": now, "typed": typed, "payload": payload})
+                    f.seek(0)
+                    f.truncate()
+                    f.write("".join(json.dumps(n, ensure_ascii=False) + "\n" for n in notes))
+                finally:
+                    fcntl.flock(f, fcntl.LOCK_UN)
+        except OSError as e:
+            print(f"[transport] typed note failed: {e}", file=sys.stderr, flush=True)
+
+    def expected(self, typed: str, via: str, window_ms: int = USER_ECHO_WINDOW_MS) -> dict | None:
+        """The noted feed entry for a prompt this writer saw as ``typed``, or None when the
+        daemon typed no such thing lately (the user typed it at the keyboard). The same
+        text sent twice is two notes, taken in order: this writer's n-th report of the
+        text gets the n-th note."""
+        since = now_ms() - window_ms
+        try:
+            with self.typed_path.open() as f:
+                notes = [n for n in self._typed_lines(f, since) if n.get("typed") == typed]
         except OSError:
-            pass
+            return None
+        if not notes:
+            return None
+        seen = sum(1 for e in self.read()[-200:]
+                   if e.get("type") == "message" and e.get("role") == "user" and e.get("via") == via
+                   and echo_key(e) == typed and int(e.get("ts", 0)) >= since)
+        payload = notes[seen].get("payload") if seen < len(notes) else None
+        return payload if isinstance(payload, dict) else None
 
     def append(self, entry: dict) -> None:
         try:
@@ -236,12 +348,12 @@ class LocalLog:
         Two writers report a prompt the phone sent: the daemon, once it has typed it, and
         the agent's own prompt hook (Claude, Scoot, Codex), a second or two apart. Each
         tags its line with ``via``. Within the window, a write is skipped when the other
-        writers already logged more copies of the same text than this writer has, so
+        writers already logged more copies of the same text (as typed) than this writer has, so
         every sent prompt ends up in the feed exactly once, repeats included ("yes"
         twice is two entries). The check and the append run under a file lock, since the
         hook is a separate process. Returns True when the entry was appended."""
         entry = {**entry, "via": via}
-        content = entry.get("content", "")
+        content = echo_key(entry)
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.path.open("a+") as f:
@@ -258,7 +370,7 @@ class LocalLog:
                         except ValueError:
                             continue
                         if (e.get("type") == "message" and e.get("role") == "user"
-                                and e.get("content") == content and int(e.get("ts", 0)) >= since):
+                                and echo_key(e) == content and int(e.get("ts", 0)) >= since):
                             if e.get("via") == via:
                                 mine += 1
                             else:

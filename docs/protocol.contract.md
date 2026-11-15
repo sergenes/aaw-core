@@ -27,7 +27,7 @@ One document per feed item:
 
 | type | payload | encrypted fields |
 | --- | --- | --- |
-| `message` | `role` (`user` \| `assistant`), `content`, `agent`, and `command_id` on the daemon's echo of a prompt from the phone (the command it delivered, since 0.1.9), so the phone matches its own prompt by id | `content` |
+| `message` | `role` (`user` \| `assistant`), `content`, `agent`, and `command_id` on the echo of a prompt from the phone (the command it delivered, since 0.1.9), so the phone matches its own prompt by id. In a shared session, since 0.1.16, a guest's prompt or answer also carries `from` (the guest's share id), `from_label` (the name its owner gave it; absent when the share has none) and `from_platform`; a message without `from` is the owner's | `content`, `from_label` |
 | `question` | `question`, `context`, `options_enc` (each option encrypted; since 0.1.9 the plaintext `options` list is not sent, every relay-era app reads `options_enc`), `kind` (`permission` \| `choice` \| `ask_user` \| `multiselect` \| ...; a pane menu the user opened, such as Claude Code's `/model`, is a `choice` titled by its own header since 0.1.10, and since 0.1.12 its options are one line each, the menu's padded columns joined with " · " ("Fable 5.1 · For your toughest challenges"), which is also the answer text echoed to the feed), `timeout_at`, `agent`, and kind-specific extras | `question`, `context`, each of `options_enc` |
 | `notification` | `message`, `level` (`info` \| `success` \| `warning` \| `error`) | `message` |
 | `reminder` | `reset_at` (epoch s), `reset_label`, agent details | none |
@@ -50,6 +50,11 @@ The plaintext copy of every event is appended to `<state dir>/sessions/<session 
 - A scheduled prompt carries `deliver_at`; the daemon leaves it queued until then and reports `scheduled_count` and `next_scheduled_at` on the project document.
   `status: "canceled"` withdraws it.
 - Consuming a command sets `consumed: true` and `status: done | failed` through a `command_update`; the relay stops replaying it.
+- Who sent it, since 0.1.16: the relay stores and forwards a guest's command with `from` (the share id, the `id` of its row in `shares`), `from_label_enc` (the label its owner set with `share`, still encrypted; absent when there is none) and `from_platform`.
+  The relay writes these and a phone cannot: whatever a phone puts in them is dropped, and the owner's commands carry none.
+  A `command_update` whose `fields` rewrite `payload` moves the sender to whoever wrote it (a guest's fields are stamped, the owner's are set to `""`); a change of `deliver_at` or `status` leaves the sender alone.
+  The share id is the first 16 hex characters of the SHA-256 of the guest's token, so a guest app can tell its own messages from another guest's.
+- A guest's prompt is typed into the agent behind a short note of who wrote it, `[from guest Anna] ` (or `[from a guest] ` when the share has no label), so the agent can tell the owner from a guest. The feed shows the text as written, with the sender in `from` and `from_label`. A slash command is typed bare, and an answer to a question is not prefixed (the agent sees only the choice); both are attributed in the feed all the same.
 
 ## 4. The project document (one per session)
 
@@ -66,7 +71,8 @@ Merged field by field (`state` frames); the phone renders the session card from 
 | `last_event_ts`, `last_event_summary` | the card's subtitle and its "last touched" order; the summary is encrypted. `last_event_ts` moves with activity only (a message, a question, a tool-call summary, a notice, a session start or stop), never with a plain status change such as a restart or an idle check |
 | `pending_question_id` | the event id of the open question, or `""` |
 | `auto_approve` | phone-set: yes/no permission prompts are answered "yes" by the daemon |
-| `pending_message` | a prompt queued while a dialog was open (encrypted by the writer) |
+| `pending_message` | a prompt queued while a dialog was open (encrypted by the writer; the daemon wrote its own in the clear until 0.1.16) |
+| `pending_from`, `pending_from_label_enc`, `pending_from_platform` | since 0.1.16, who queued `pending_message`: the relay stamps them when a guest sets it through `state` and empties them when the owner's phone does; the daemon writes them itself when it queues a command, and clears them once the message is typed |
 | `scheduled_count`, `next_scheduled_at` | the scheduled-prompt badge |
 
 ## 5. The computer document
@@ -111,9 +117,15 @@ On unlink, or when the user removes the computer, it sends `forget_phone {req}` 
 Session sharing (relay store version 4, 0.1.13).
 An unscoped phone mints a guest with `share {req, project_id, guest_token, label_enc?}` (the token is its own random value; `label_enc` is the owner's name for the guest, encrypted), lists them with `shares {req, project_id}` (without `project_id`: every guest on the computer, the owner's overview), and drops one with `revoke_share {req, project_id, share_id}`; each is answered with `shares {req, project_id?, shares[{id, project_id, label_enc, platform, created, last_seen}]}`, and a revoked guest's sockets are closed with `error {message: "access revoked"}`.
 A guest's `welcome` carries `scope`, its project id.
-The relay accepts from a guest only `ping`, `forget_phone`, `computer`, `projects` (filtered to its session), and `subscribe`, `ack`, `history`, `commands`, `command`, `command_update`, `command_delete`, `project` and `state` carrying its project id; anything else, `request` and `project_delete` included, is answered with `error {message: "not allowed for a shared session", req}`.
+The relay accepts from a guest only `ping`, `forget_phone`, `computer`, `projects` (filtered to its session), `subscribe`, `ack`, `history`, `commands`, `command`, `command_update`, `command_delete`, `project` and `state` carrying its project id, and since 0.1.16 the file requests below; anything else, the session requests and `project_delete` included, is answered with `error {message: "not allowed for a shared session", req}`.
+A guest's files, since 0.1.16: a guest may send `request` with kind `fs_browse`, `fs_fetch` or `fs_attach`, written exactly as an owner's phone writes them.
+The relay cannot judge a path (it crosses the relay encrypted), so the fence is the computer's: the relay forwards the request as kind `guest_<kind>` with one more field, `scope` (the guest's project id), under a request id of its own, and the supervisor serves `fs_browse` and `fs_fetch` with that session's folder as the only root.
+The root listing is the folder itself (`at_root`, no parent), a path outside it or a link that leaves it answers `outside_roots`, and a scope with no known session or folder answers `denied`.
+An engine older than 0.1.16 does not know the `guest_` kinds and answers `unknown_request`, so it never serves a guest the whole computer; the guest app should read that as "the computer needs an update".
+The response returns to the guest that asked and to nobody else, under the id and kind the guest used; `start_session`, `stop_session` and `new_session` stay refused.
+A file a phone attached lives in the computer's attachments folder, outside the session's folder, so a guest cannot open another phone's attachment from the feed.
 It forwards a guest only its session's frames and the computer document, and pushes it only for its session.
-Sharing is free on every plan and a guest keeps full control of the session (prompts, answers, stop and restart through commands); the owner cannot see or approve a guest's prompts before they run.
+Sharing is free on every plan and a guest keeps full control of the session (prompts, answers, stop and restart through commands); the owner cannot approve a guest's prompts before they run, but since 0.1.16 every one of them is named in the feed and to the agent (section 3).
 A revoked guest keeps the key, so history it already fetched stays readable; key rotation is not part of this version.
 
 The phone's `request` frames the supervisor answers (`response {req, kind, payload}`):
