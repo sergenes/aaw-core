@@ -24,7 +24,7 @@ from aaw_core.encryption import decrypt_if_encrypted, encrypt, is_encrypted
 
 # Fields encrypted per event type. Everything else stays plaintext for routing and UI.
 SENSITIVE_FIELDS: dict[str, tuple[str, ...]] = {
-    "message": ("content", "from_label"),
+    "message": ("content", "from_label", "question"),
     "question": ("question", "context"),
     "notification": ("message",),
 }

@@ -40,7 +40,7 @@ def test_the_agent_reads_a_guests_prompt_behind_a_note():
 
 
 def test_the_guests_name_is_encrypted_like_the_text():
-    assert SENSITIVE_FIELDS["message"] == ("content", "from_label")
+    assert SENSITIVE_FIELDS["message"] == ("content", "from_label", "question")
 
 
 def transport(tmp_path) -> RelayTransport:
