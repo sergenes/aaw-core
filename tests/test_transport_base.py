@@ -22,9 +22,10 @@ KEY = generate_key_b64()
 
 def test_sensitive_fields_are_the_contract():
     # Changing these would break the shipped phone apps. `from_label` (0.1.16) is a new
-    # field, the name of the guest who sent a message; apps that predate it never read it.
+    # field, the name of the guest who sent a message, and `question` (0.1.17) the question an
+    # answer's echo quotes; apps that predate them never read them.
     assert SENSITIVE_FIELDS == {
-        "message": ("content", "from_label"),
+        "message": ("content", "from_label", "question"),
         "question": ("question", "context"),
         "notification": ("message",),
     }

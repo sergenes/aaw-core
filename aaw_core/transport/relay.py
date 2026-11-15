@@ -30,6 +30,7 @@ from pathlib import Path
 
 import websockets
 
+from aaw_core.encryption import is_encrypted
 from aaw_core.host import state
 from aaw_core.transport.base import (
     PROTO_VERSION,
@@ -48,6 +49,9 @@ from aaw_core.transport.base import (
 )
 
 _REQUEST_TIMEOUT = 15.0
+# Questions whose text is kept so the answer's echo can quote it, and how much of it.
+QUESTIONS_REMEMBERED = 32
+QUESTION_QUOTE_MAX = 2000
 _RECONNECT_MIN = 1.0
 _RECONNECT_MAX = 30.0
 # A loaded Mac (load average over 80 was measured with an IDE indexing) starves these
@@ -83,6 +87,7 @@ class RelayTransport:
         self._log = LocalLog(sessions_dir, project_id)
         self._mirror_dir = state.mirror_dir(sessions_dir.parent)  # <state dir>/projects, for a local GUI
         self._question_id: str | None = None
+        self._questions: dict[str, str] = {}  # question event id -> its text, for the answer's echo
         self._notif_limiter = RateLimiter(max_events=20, window_seconds=60)
         self._sched_last: tuple | None = None
         self._sched_list_last: list | None = None
@@ -387,6 +392,8 @@ class RelayTransport:
             if noted:
                 typed, payload = payload.get("content", ""), noted
         stored, entry = make_event(event_type, payload, self._enc_key)
+        if event_type == "question":
+            self._remember_question(stored["id"], payload.get("question", ""))
         if echo:
             if typed and typed != entry.get("content"):
                 entry["typed"] = typed  # local only: what the two writers are matched on
@@ -465,13 +472,37 @@ class RelayTransport:
                     "fields": {"consumed": True}})
         self.set_project_status("running", pending_question_id="")
         answer = self.decrypt_field(p["answer_enc"]) if p.get("answer_enc") else p.get("answer", "")
-        # The answer's trace in the feed, right after its question, once the question card
-        # is gone. The phone cannot write events on the relay, so the computer does it.
+        # The answer's trace in the feed, once the question card is gone. The phone cannot
+        # write events on the relay, so the computer does it. It carries its question (0.1.17):
+        # a prompt can land between the two, and "Yes" alone says nothing.
         if answer:
             # via="daemon": a free-text answer is typed into the pane, so the agent's
             # prompt hook reports it too, and the two must land as one feed entry.
-            self.write_event("message", {"role": "user", "content": answer, **self.sender_of(doc)}, via="daemon")
+            self.write_event("message", {"role": "user", "content": answer, **self.sender_of(doc),
+                                         **self._question_of(question_id, p)}, via="daemon")
         return answer
+
+    def _remember_question(self, question_id: str, question: str) -> None:
+        if not question_id or not question:
+            return
+        with self._lock:
+            self._questions[question_id] = question
+            while len(self._questions) > QUESTIONS_REMEMBERED:
+                self._questions.pop(next(iter(self._questions)))
+
+    def _question_of(self, question_id: str, answer_payload: dict) -> dict:
+        """What an answer's echo says about its question: the id, and the text as this
+        process asked it, else as the answering phone quoted it (`question_enc`)."""
+        with self._lock:
+            question = self._questions.get(question_id, "")
+        if not question and answer_payload.get("question_enc"):
+            question = self.decrypt_field(answer_payload["question_enc"]) or ""
+            if is_encrypted(question):
+                question = ""  # a quote this key cannot read
+        out = {"question_id": question_id}
+        if question:
+            out["question"] = question[:QUESTION_QUOTE_MAX]
+        return out
 
     def poll_answer(self, deadline: float) -> str | None:
         while time.time() < deadline:
