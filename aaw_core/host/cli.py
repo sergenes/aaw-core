@@ -42,6 +42,12 @@ SCRIPTS_DIR = Path(__file__).resolve().parent / "scripts"
 QR_VERSION = 1
 
 
+TMUX_MISSING = ("aaw: tmux is not installed, and every session runs inside it. Install it, then run this again:\n"
+                "  macOS:          brew install tmux\n"
+                "  Debian, Ubuntu: sudo apt install tmux\n"
+                "  Fedora, RHEL:   sudo dnf install tmux")
+
+
 def die(msg: str, code: int = 1) -> None:
     print(f"aaw: {msg}", file=sys.stderr)
     sys.exit(code)
@@ -342,7 +348,11 @@ def cmd_status(a, settings: Settings) -> None:
         snap = status_snapshot(settings)
         if a.agents:
             snap["detected_agents"] = hooks_installer.detected_agents()
-            snap["scoot_models"] = sessions.scoot_models()
+            scoot = sessions.scoot_status()
+            snap["scoot_models"] = scoot[0] if scoot is not None else None
+            # Why a provider has no models (0.1.18), so an app can say it next to a scoot
+            # it cannot start: {} when all answered, null when scoot is not installed.
+            snap["scoot_errors"] = scoot[1] if scoot is not None else None
         print(json.dumps(snap, sort_keys=True))
         return
     live = sessions.list_sessions()
@@ -360,9 +370,11 @@ def cmd_status(a, settings: Settings) -> None:
           + (FOCUS_HINT if settings.local_notifications and sys.platform == "darwin" else ""))
     print(f"Linked: {'yes, computer ' + ident.computer_id[:8] + '...' if ident else 'no (aaw link)'}; "
           f"session key: {'yes' if settings.session_key_file.exists() else 'no'}")
-    sm = sessions.scoot_models()
-    if sm is not None:
-        print(f"Scoot: {len(sm)} models available (aaw models)")
+    scoot = sessions.scoot_status()
+    if scoot is not None:
+        print(f"Scoot: {len(scoot[0])} models available (aaw models)")
+        for provider, why in sorted(scoot[1].items()):
+            print(f"  {provider}: {why}")
 
 
 # ── the feed ─────────────────────────────────────────────────────────────────
@@ -613,7 +625,8 @@ def cmd_mobile_mode(a, settings: Settings) -> None:
 
 
 def cmd_models(a, settings: Settings) -> None:
-    models = sessions.scoot_models()
+    scoot = sessions.scoot_status()
+    models = scoot[0] if scoot is not None else None
     if a.json:
         print(json.dumps(models if models is not None else None))
         return
@@ -621,6 +634,8 @@ def cmd_models(a, settings: Settings) -> None:
         die("scoot is not installed (pipx install scootcli)")
     if not models:
         print("No models available. Add a key with `scoot auth set <provider>`, or start Ollama.")
+        for provider, why in sorted(scoot[1].items()):
+            print(f"  {provider}: {why}")
         return
     for m in models:
         if not a.provider or m.startswith(a.provider + "/"):
@@ -870,6 +885,12 @@ def main(argv: list[str] | None = None) -> int:
         a.fn(a, load_settings())
     except KeyboardInterrupt:
         return 130
+    except FileNotFoundError as e:
+        # A pip-only install on a machine without tmux: every session lives in tmux.
+        if os.path.basename(str(e.filename or "")) != "tmux":
+            raise
+        print(TMUX_MISSING, file=sys.stderr)
+        return 1
     return 0
 
 

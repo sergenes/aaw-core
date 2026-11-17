@@ -376,13 +376,28 @@ def scoot_installed() -> bool:
     return shutil.which("scoot") is not None
 
 
-def scoot_models() -> list[str] | None:
-    """Model ids the installed scoot can serve (provider/model), or None when scoot is absent."""
+SCOOT_ERROR_MAX = 300  # a provider's error, as shown next to a scoot that has no models
+
+
+def scoot_status() -> tuple[list[str], dict[str, str]] | None:
+    """What the installed scoot can serve: its model ids (provider/model) and, for each
+    provider it could not reach, why (`scoot models --json` reports them as `errors`:
+    Ollama not running, a rejected API key). None when scoot is absent or unreadable."""
     if not scoot_installed():
         return None
     try:
         r = subprocess.run(["scoot", "models", "--json"], capture_output=True, text=True, timeout=30, check=False)
         data = json.loads(r.stdout or "{}")
-        return sorted(m["id"] for m in data.get("models", []) if m.get("id"))
-    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        models = sorted(m["id"] for m in data.get("models", []) if m.get("id"))
+        raw = data.get("errors")
+        errors = {str(k): " ".join(str(v).split())[:SCOOT_ERROR_MAX]
+                  for k, v in (raw.items() if isinstance(raw, dict) else []) if v}
+        return models, errors
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError):
         return None
+
+
+def scoot_models() -> list[str] | None:
+    """Model ids the installed scoot can serve (provider/model), or None when scoot is absent."""
+    status = scoot_status()
+    return status[0] if status is not None else None

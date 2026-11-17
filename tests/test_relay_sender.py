@@ -60,3 +60,13 @@ def test_a_refused_frame_is_resent_on_the_next_socket(tmp_path):
         await asyncio.wait_for(session, 2)
 
     asyncio.run(run())
+
+
+def test_a_request_the_relay_never_answers_says_so(tmp_path):
+    """With the lid closed the Mac wakes for seconds, the supervisor's requests time out,
+    and the log read "project read failed: " with nothing after the colon."""
+    t = RelayTransport(relay_url="wss://example/v1/ws", token="t", computer_id="c", project_id="p",
+                       sessions_dir=tmp_path / "sessions")
+    with pytest.raises(TimeoutError, match="no reply from the relay in 0 s"):
+        t._request({"type": "projects"}, timeout=0.05)
+    assert t._pending == {}

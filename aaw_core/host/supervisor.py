@@ -15,6 +15,7 @@ Runs as a user service (systemd on Linux, launchd on macOS) or in the foreground
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import signal
@@ -127,9 +128,14 @@ class Supervisor:
 
     def heartbeat(self) -> None:
         try:
+            scoot = sessions.scoot_status()
+            # Why scoot has no models from a provider (0.1.18), for the phone's agent picker.
+            # Encrypted: a provider's error can quote part of a key or an account.
+            errors = scoot[1] if scoot is not None else {}
             self.transport.update_computer(
                 status="online", platform=platform_name(), detected_agents=hooks_installer.detected_agents(),
-                scoot_models=sessions.scoot_models() or [])
+                scoot_models=scoot[0] if scoot is not None else [],
+                scoot_errors_enc=self.transport.encrypt_field(json.dumps(errors, sort_keys=True)) if errors else "")
         except Exception as e:  # noqa: BLE001 - a heartbeat must never stop the loop
             self.log(f"heartbeat failed: {e}")
 
@@ -556,14 +562,16 @@ class Supervisor:
                 # Pressure first, so memory_critical is current before restart_stuck reads it.
                 for duty in (self.check_memory_pressure, self.restart_orphans, self.reconcile_stopped,
                              self.restart_stuck, self.check_waiting_alerts):
-                    started = time.time()
+                    # A clock that stops while the computer sleeps: with the lid closed a
+                    # duty that began before the nap was logged as taking two hours.
+                    started = time.monotonic()
                     try:
                         with self.session_lock:
                             duty()
                     except Exception as e:  # noqa: BLE001 - one failed duty must not stop the others
                         self.log(f"{duty.__name__} failed: {e}")
-                    if time.time() - started > SLOW_DUTY_S:
-                        self.log(f"{duty.__name__} took {time.time() - started:.1f} s")
+                    if time.monotonic() - started > SLOW_DUTY_S:
+                        self.log(f"{duty.__name__} took {time.monotonic() - started:.1f} s")
 
         self.log("supervisor stopping")
         try:

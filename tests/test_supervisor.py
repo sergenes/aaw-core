@@ -30,6 +30,9 @@ class FakeTransport:
     def update_computer(self, **fields):
         self.computer_updates.append(fields)
 
+    def encrypt_field(self, value):
+        return encrypt(value, KEY)
+
     def write_notification(self, message, level, set_running=False):
         self.notifications.append((message, level))
 
@@ -61,7 +64,7 @@ def sup(tmp_path, monkeypatch):
     s.home = home
     monkeypatch.setattr(sessions, "list_sessions", list)
     monkeypatch.setattr(sessions, "session_agent", lambda p: None)
-    monkeypatch.setattr(sessions, "scoot_models", lambda: None)
+    monkeypatch.setattr(sessions, "scoot_status", lambda: None)
     monkeypatch.setattr(hooks_installer, "detected_agents", lambda: ["claude", "codex"])
     return s
 
@@ -430,3 +433,18 @@ def test_a_guests_attachment_is_saved_like_any_phones(shared):
     data = base64.b64encode(b"\x89PNG fake").decode()
     reply = shared.handle_guest_request("fs_attach", {"suffix": ".png", "chunks": [encrypt(data, KEY)]}, "proj")
     assert reply["error"] == "" and Path(decrypt(reply["path_enc"], KEY)).read_bytes() == b"\x89PNG fake"
+
+
+def test_heartbeat_says_why_scoot_has_no_models_encrypted(sup, monkeypatch):
+    """0.1.18: the phone's agent picker shows scoot with the reason instead of hiding it."""
+    import json
+    why = {"ollama": "could not connect to http://localhost:11434", "openai": "Incorrect API key provided: sk-x***"}
+    monkeypatch.setattr(sessions, "scoot_status", lambda: ([], why))
+    sup.heartbeat()
+    sent = sup.transport.computer_updates[-1]
+    assert sent["scoot_models"] == [] and "sk-x" not in sent["scoot_errors_enc"]
+    assert json.loads(decrypt(sent["scoot_errors_enc"], KEY)) == why
+    monkeypatch.setattr(sessions, "scoot_status", lambda: (["ollama/qwen"], {}))
+    sup.heartbeat()
+    sent = sup.transport.computer_updates[-1]
+    assert (sent["scoot_models"], sent["scoot_errors_enc"]) == (["ollama/qwen"], "")  # the reason is withdrawn
