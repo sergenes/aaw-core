@@ -57,7 +57,7 @@ The plaintext copy of every event is appended to `<state dir>/sessions/<session 
   The share id is the first 16 hex characters of the SHA-256 of the guest's token, so a guest app can tell its own messages from another guest's.
 - Sent from a phone, since 0.1.18: the relay stores and forwards every command a phone wrote with `via: "phone"`; a command from the computer's own tools (`aaw send`, the Mac's Session Feed) carries none.
   Like the sender fields, only the relay writes it.
-  It tells the relay whose turn a prompt starts (see "Pausing a shared session's notifications").
+  It is informational since 0.1.19 (0.1.18 used it to tell the owner's phone from the computer's keyboard).
 - A guest's prompt is typed into the agent behind a short note of who wrote it, `[from guest Anna] ` (or `[from a guest] ` when the share has no label), so the agent can tell the owner from a guest. The feed shows the text as written, with the sender in `from` and `from_label`. A slash command is typed bare, and an answer to a question is not prefixed (the agent sees only the choice); both are attributed in the feed all the same.
 
 ## 4. The project document (one per session)
@@ -130,7 +130,10 @@ The pause belongs to that phone token and that session, lasts until the phone re
 A relay before 0.1.18 answers `error {message: "unknown frame type 'notify_pause'"}` (with `req` only since 0.1.18, so a client should also treat a timeout as "the relay is too old").
 While paused, the phone is notified only of the turns it started itself.
 A turn belongs to whoever sent the prompt that started it, and the relay reads that from the feed: the last `message` with `role: user` and no `question_id` (an answer starts no turn).
-With a `from` it is that guest's turn; with a `command_id` whose command carries `via: "phone"` and no `from` it is the owner's (every unscoped phone is the owner); typed at the computer, sent by the computer's own tools, or scheduled (`deliver_at`), it is nobody's, and everyone is notified whatever they paused.
+With a `from` it is that guest's turn; otherwise it is the owner's, whether the prompt came from an unscoped phone (every unscoped phone is the owner), was typed at the computer or was sent by the computer's own tools.
+Only a scheduled prompt (`deliver_at`) and a feed with no prompt yet are nobody's, and everyone is notified whatever they paused.
+0.1.18 also counted a prompt typed at the computer as nobody's, so a guest who paused was still rung for everything the owner typed at the keyboard; fixed in 0.1.19.
+Without `project_id` (and without `paused`), since 0.1.19, `notify_pause {req}` is answered with `notify_pause {req, paused_projects: [project ids]}`, the sessions this phone has paused, for the marks in its list of sessions; 0.1.18 answers `error {message: "invalid pause", req}`.
 For an event of somebody else's turn that would wake a phone (a `question`, a `notification` at `success`, `error` or `warning`), a paused phone gets no push, and its live sockets receive the `event` frame with `quiet: true`: the app shows it in the feed and posts no banner.
 The same holds for a missed event replayed after `subscribe`.
 The rule is the relay's alone; a phone only sets the pause and honors `quiet`.

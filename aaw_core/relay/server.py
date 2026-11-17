@@ -20,8 +20,9 @@ Frames are JSON text messages with a ``type``:
     share            {req, project_id, guest_token, label_enc?} (phone)    mint a guest token scoped to one session
     shares           {req, project_id?}                         (phone)    the guests of a session, or of every session
     revoke_share     {req, project_id, share_id}                (phone)    drop a guest (its sockets close)
-    notify_pause     {req, project_id, paused?}                 (phone)    set, or without `paused` read, this
-                                                                           phone's pause for a shared session
+    notify_pause     {req, project_id?, paused?}                (phone)    set, or without `paused` read, this
+                                                                           phone's pause for a shared session;
+                                                                           without `project_id`, list them
     command          {project_id, command}                      (either)   new command / prompt / answer
     command_update   {project_id, command_id, fields}           (either)
     command_delete   {project_id, command_id}                   (either)
@@ -79,15 +80,18 @@ is stamped the same way with ``pending_from``, ``pending_from_label_enc`` and
 
 Since 0.1.18 a phone may pause the notifications of a shared session for the turns
 somebody else started (``notify_pause``, kept per phone token and session). A turn
-belongs to whoever sent the prompt that started it: a guest (its share id), the owner
-(any unscoped phone), or nobody on a phone (typed at the computer, sent by the
-computer's own tools, or scheduled), and the relay reads that from the feed: the last
-user message that is not an answer, by its ``from`` and its ``command_id``. A paused
-phone is not pushed an event of somebody else's turn, and its live sockets receive
-that event with ``quiet: true`` so the app posts no banner of its own. The sender of
-a prompt is always notified, and a turn nobody on a phone started notifies everyone.
-To tell a phone's command from the computer's, a command a phone wrote is stored and
-forwarded with ``via: "phone"``, which, like the sender fields, only the relay writes.
+belongs to whoever sent the prompt that started it: a guest (its share id), else the
+owner, whether the prompt came from an unscoped phone, was typed at the computer or
+was sent by the computer's own tools (0.1.19: the owner at the keyboard is the owner;
+0.1.18 counted that as nobody's turn and rang a paused guest for it). Only a scheduled
+prompt is nobody's: it notifies everyone. The relay reads the turn from the feed: the
+last user message that is not an answer, by its ``from`` and its ``command_id``. A
+paused phone is not pushed an event of somebody else's turn, and its live sockets
+receive that event with ``quiet: true`` so the app posts no banner of its own. The
+sender of a prompt is always notified. Without ``project_id``, ``notify_pause`` lists
+the sessions this phone has paused (``paused_projects``, 0.1.19).
+A command a phone wrote is stored and forwarded with ``via: "phone"``, which, like the
+sender fields, only the relay writes.
 
 Abuse limits (the ``Abuse limits`` constants): incoming frames are capped in size
 and per-connection rate, a socket must say hello within a deadline, history
@@ -205,8 +209,8 @@ PENDING_SENDER_FIELDS = ("pending_from", "pending_from_label_enc", "pending_from
 RELAY_COMMAND_FIELDS = (*SENDER_FIELDS, "via")
 
 # Whose turn it is (0.1.18), for a phone that paused a shared session's notifications:
-# a guest's share id, OWNER_TURN for any unscoped phone, EVERYONES_TURN when nobody on
-# a phone started it.
+# a guest's share id, OWNER_TURN for the owner (a phone of theirs, or the computer's
+# keyboard and tools), EVERYONES_TURN for a scheduled prompt and an empty feed.
 OWNER_TURN = "owner"
 EVERYONES_TURN = ""
 
@@ -733,6 +737,8 @@ class Relay:
             return True
         if kind == "request":
             return isinstance(frame.get("kind"), str) and frame["kind"] in GUEST_REQUEST_KINDS
+        if kind == "notify_pause" and frame.get("project_id") is None:
+            return True  # its own list of paused sessions: at most its one session
         if kind in GUEST_SESSION_FRAMES:
             return frame.get("project_id") == conn.scope
         return False
@@ -819,12 +825,14 @@ class Relay:
         sender = prompt.get("from") or (command or {}).get("from")
         if isinstance(sender, str) and sender:
             return sender
-        return OWNER_TURN if command is not None and command.get("via") == "phone" else EVERYONES_TURN
+        # Not a guest's: the owner's, from a phone of theirs or at the computer itself
+        # (typed into the terminal, `aaw send`, the Mac's Session Feed).
+        return OWNER_TURN
 
     async def _quiet_tokens(self, computer_id: str, project_id: str, before_seq: int | None = None) -> set[str]:
         """The phone tokens that are not to be notified of this session's current turn:
-        those that paused it, minus whoever started the turn. Empty for a turn nobody on
-        a phone started."""
+        those that paused it, minus whoever started the turn. Empty for a turn that is
+        nobody's (a scheduled prompt)."""
         rows = await self._fetchall(
             "SELECT p.token, d.scope FROM pauses p JOIN devices d ON d.token=p.token"
             " WHERE p.computer_id=? AND p.project_id=?", (computer_id, project_id))
@@ -1027,6 +1035,13 @@ class Relay:
         if conn.role != "phone":
             return
         project_id, paused = frame.get("project_id"), frame.get("paused")
+        if project_id is None and paused is None:
+            # Every session this phone has paused, for the marks in its list of sessions.
+            rows = await self._fetchall("SELECT project_id FROM pauses WHERE token=? AND computer_id=?"
+                                        " ORDER BY project_id", (conn.token, conn.computer_id))
+            await conn.send({"type": "notify_pause", "req": frame.get("req"),
+                             "paused_projects": [r["project_id"] for r in rows]})
+            return
         if _bad_str(project_id, "project_id") or not (paused is None or isinstance(paused, bool)):
             await conn.send({"type": "error", "message": "invalid pause", "req": frame.get("req")})
             return

@@ -131,17 +131,29 @@ def test_a_guest_who_paused_is_spared_the_owners_turn_and_another_guests(relay):
     comp.__exit__(None, None, None)
 
 
-def test_a_turn_nobody_on_a_phone_started_notifies_everyone(relay):
+def test_a_prompt_typed_at_the_computer_is_the_owners_turn(relay):
+    """Seen 2026-11-16, the first day of the pause: a guest who paused was still pushed
+    every response to what the owner typed at her own keyboard. 0.1.18 called such a
+    turn nobody's and notified everyone; the owner at the computer is the owner."""
     comp = offline_turns(relay, owner_paused=True, guest_paused=True)
     # typed at the keyboard: an echo without a command
     comp.send_json({"type": "event", "project_id": "proj", "event": prompt_echo("typed")})
+    comp.send_json({"type": "event", "project_id": "proj", "event": question("q1")})
     comp.send_json({"type": "event", "project_id": "proj", "event": alert("n1")})
     barrier(comp)
-    assert sorted(pushed(relay)) == sorted([(OWNER_PUSH, "n1"), (GUEST_PUSH, "n1")])
+    assert pushed(relay) == [(OWNER_PUSH, "q1"), (OWNER_PUSH, "n1")]
     relay.push.calls.clear()
     # sent by the computer's own tools (aaw send, the Mac's Session Feed)
     turn(comp, comp, "c1", alert("n2"))
-    assert sorted(pushed(relay)) == sorted([(OWNER_PUSH, "n2"), (GUEST_PUSH, "n2")])
+    assert pushed(relay) == [(OWNER_PUSH, "n2")]
+    comp.__exit__(None, None, None)
+
+
+def test_a_scheduled_prompt_and_an_empty_feed_notify_everyone(relay):
+    comp = offline_turns(relay, owner_paused=True, guest_paused=True)
+    comp.send_json({"type": "event", "project_id": "proj", "event": alert("n0")})  # no prompt in the feed yet
+    barrier(comp)
+    assert sorted(pushed(relay)) == sorted([(OWNER_PUSH, "n0"), (GUEST_PUSH, "n0")])
     relay.push.calls.clear()
     # scheduled from a phone: nobody is holding a phone for it when it runs
     with relay.websocket_connect("/v1/ws") as guest:
@@ -151,6 +163,20 @@ def test_a_turn_nobody_on_a_phone_started_notifies_everyone(relay):
     barrier(comp)
     assert sorted(pushed(relay)) == sorted([(OWNER_PUSH, "n3"), (GUEST_PUSH, "n3")])
     comp.__exit__(None, None, None)
+
+
+def test_a_phone_lists_the_sessions_it_paused(relay):
+    with relay.websocket_connect("/v1/ws") as comp, relay.websocket_connect("/v1/ws") as owner, \
+            relay.websocket_connect("/v1/ws") as guest:
+        pair(comp, owner, guest)
+        pause(owner), pause(owner, project_id="other"), pause(guest)
+        owner.send_json({"type": "notify_pause", "req": "all"})
+        assert recv_type(owner, "notify_pause")["paused_projects"] == ["other", "proj"]
+        guest.send_json({"type": "notify_pause", "req": "all"})
+        assert recv_type(guest, "notify_pause")["paused_projects"] == ["proj"]
+        pause(owner, False)
+        owner.send_json({"type": "notify_pause", "req": "all"})
+        assert recv_type(owner, "notify_pause")["paused_projects"] == ["other"]
 
 
 def test_an_answer_does_not_take_the_turn_and_resume_restores_the_pushes(relay):
@@ -200,7 +226,7 @@ def test_a_missed_event_is_replayed_quiet(relay):
         hello_phone(guest, "gtok")
         turn(comp, guest, "g1")
     comp.send_json({"type": "event", "project_id": "proj", "event": alert("n1")})
-    comp.send_json({"type": "event", "project_id": "proj", "event": prompt_echo("typed")})
+    comp.send_json({"type": "event", "project_id": "proj", "event": prompt_echo("typed")})  # his own keyboard
     comp.send_json({"type": "event", "project_id": "proj", "event": alert("n2")})
     barrier(comp)
     with relay.websocket_connect("/v1/ws") as owner:
