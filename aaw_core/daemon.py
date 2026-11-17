@@ -150,10 +150,13 @@ def flush_pending_message(transport: RelayTransport, session: str, agent: str) -
         if not queued:
             return
         time.sleep(0.3)  # let the prompt clear from the pane
-        if not forward_text(transport, session, agent, queued, sender=transport.sender_of(doc, "pending_from")):
+        # With the id of the command that carried it (0.1.18): the echo then names its
+        # prompt like any other, for the phone's row and for whose turn this is.
+        if not forward_text(transport, session, agent, queued, command_id=doc.get("pending_command_id") or None,
+                            sender=transport.sender_of(doc, "pending_from")):
             log(f"pending message not delivered, keeping it queued: {queued[:50]}", err=True)
             return
-        transport.update_project(pending_message="", **dict.fromkeys(PENDING_SENDER, ""))
+        transport.update_project(pending_message="", pending_command_id="", **dict.fromkeys(PENDING_SENDER, ""))
         log(f"flushed the pending message: {queued[:50]}")
     except Exception as e:  # noqa: BLE001
         log(f"pending message flush failed: {e}", err=True)
@@ -231,7 +234,8 @@ def handle_command(cmd: dict, transport: RelayTransport, settings: Settings, *, 
                 # Encrypted, as the contract says: the relay must not hold a prompt in the
                 # clear (it did until 0.1.16). With its sender, as the relay stamped the
                 # command, for the echo later.
-                transport.update_project(pending_message=transport.encrypt_field(args), **{
+                transport.update_project(pending_message=transport.encrypt_field(args),
+                                         pending_command_id=cmd.get("id") or "", **{
                     field: cmd.get(src) or "" for field, src in zip(
                         PENDING_SENDER, ("from", "from_label_enc", "from_platform"), strict=True)})
                 log("a prompt is open; message queued until it is answered")
