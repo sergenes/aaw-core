@@ -86,6 +86,7 @@ Merged field by field (`state` frames); the phone renders the session card from 
 | `platform` | `linux` \| `macos` |
 | `detected_agents` | which agent CLIs are installed |
 | `scoot_models` | model ids scoot can serve |
+| `scoot_errors_enc` | since 0.1.18, why scoot has no models from a provider: an encrypted JSON object `{provider: message}` (Ollama not running, a rejected API key), `""` when every provider answered. `aaw status --json --agents` gives the same map in the clear as `scoot_errors` (`null` when scoot is not installed) |
 | `daemon_version` | the aaw-core version |
 | `session_pct`, `weekly_pct`, `extra_pct` | Claude usage after `/usage` |
 

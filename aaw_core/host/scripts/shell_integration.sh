@@ -43,16 +43,30 @@ _aaw_run() {
     fi
 }
 
-claude()       { _aaw_run claude claude "$@"; }
-codex()        { _aaw_run codex codex "$@"; }
-gemini()       { _aaw_run gemini gemini "$@"; }
-grok()         { _aaw_run grok grok "$@"; }
+# Each wrapper stands on its own: a tool that copies the shell's functions into a shell
+# of its own may leave the helpers above behind (Claude Code's Bash tool drops the names
+# that start with an underscore), and the wrapper must then reach the real binary instead
+# of failing with "command not found: _aaw_run".
+claude() {
+    if command -v _aaw_run >/dev/null 2>&1; then _aaw_run claude claude "$@"; else command claude "$@"; fi
+}
+codex() {
+    if command -v _aaw_run >/dev/null 2>&1; then _aaw_run codex codex "$@"; else command codex "$@"; fi
+}
+gemini() {
+    if command -v _aaw_run >/dev/null 2>&1; then _aaw_run gemini gemini "$@"; else command gemini "$@"; fi
+}
+grok() {
+    if command -v _aaw_run >/dev/null 2>&1; then _aaw_run grok grok "$@"; else command grok "$@"; fi
+}
 # Cursor's CLI is cursor-agent (never bare `agent`: Grok's CLI installs one too).
-cursor-agent() { _aaw_run cursor cursor-agent "$@"; }
+cursor-agent() {
+    if command -v _aaw_run >/dev/null 2>&1; then _aaw_run cursor cursor-agent "$@"; else command cursor-agent "$@"; fi
+}
 # scoot's non-REPL invocations go straight to the real binary.
 scoot() {
     case "${1:-}" in
         models|auth|--version|-v|-V|--help|-h|--json|--headless|-p|--print) command scoot "$@"; return ;;
     esac
-    _aaw_run scoot scoot "$@"
+    if command -v _aaw_run >/dev/null 2>&1; then _aaw_run scoot scoot "$@"; else command scoot "$@"; fi
 }

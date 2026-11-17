@@ -216,3 +216,77 @@ def test_root_is_refused_with_what_to_do(monkeypatch, capsys):
     assert e.value.code == 0
     monkeypatch.setattr(cli.os, "geteuid", lambda: 501)
     assert not cli._refused_as_root(["start", "proj"])
+
+
+def test_without_tmux_the_cli_says_so_instead_of_a_traceback(tmp_path, monkeypatch, capsys):
+    """Seen 2026-11-14 in a pip-only install in a clean container: `aaw status` ended in
+    FileNotFoundError: 'tmux'. The installer checks for tmux; the CLI did not."""
+    from aaw_core.host import tmux
+    monkeypatch.setenv("AAW_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(tmux, "_TMUX_BIN", str(tmp_path / "bin" / "tmux"))
+    assert cli.main(["status"]) == 1
+    err = capsys.readouterr().err
+    assert "tmux is not installed" in err and "brew install tmux" in err and "Traceback" not in err
+
+
+def test_a_missing_file_that_is_not_tmux_is_not_swallowed(tmp_path, monkeypatch):
+    monkeypatch.setenv("AAW_STATE_DIR", str(tmp_path))
+
+    def boom(a, settings):
+        raise FileNotFoundError(2, "No such file or directory", "/etc/else")
+    monkeypatch.setattr(cli, "cmd_status", boom)
+    with pytest.raises(FileNotFoundError):
+        cli.main(["status"])
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_a_wrapper_without_its_helper_reaches_the_real_binary(shell, tmp_path):
+    """Claude Code's Bash tool copies the shell's functions into its own shell and leaves
+    out the names that start with an underscore, so `claude` there failed with
+    "command not found: _aaw_run" (seen 2026-11-14)."""
+    import shutil
+    import subprocess
+    from pathlib import Path
+    if not shutil.which(shell):
+        pytest.skip(f"{shell} is not installed")
+    script = Path(cli.__file__).parent / "scripts" / "shell_integration.sh"
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name in ("claude", "codex", "gemini", "grok", "cursor-agent", "scoot"):
+        (bindir / name).write_text(f'#!/bin/sh\necho "real {name} $*"\n')
+        (bindir / name).chmod(0o755)
+    run = (f'. "{script}"; unset -f _aaw_run _aaw_interactive; PATH="{bindir}:$PATH"; '
+           'claude a; codex b; gemini c; grok d; cursor-agent e; scoot f')
+    r = subprocess.run([shell, "-c", run], capture_output=True, text=True, timeout=20, check=False)
+    assert r.stdout.split("\n")[:6] == ["real claude a", "real codex b", "real gemini c", "real grok d",
+                                        "real cursor-agent e", "real scoot f"], r.stderr
+    assert "_aaw_run" not in r.stderr
+
+
+def test_status_json_says_why_scoot_has_no_models(tmp_path, monkeypatch, capsys):
+    """The Mac's Start Session hid scoot when it had no models (Ollama stopped, a rejected
+    key), with nothing to say why. `scoot models --json` knows; pass it through."""
+    import subprocess
+
+    from aaw_core.host import hooks_installer, sessions
+    monkeypatch.setenv("AAW_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(sessions, "list_sessions", list)
+    monkeypatch.setattr(hooks_installer, "detected_agents", lambda: ["scoot"])
+    monkeypatch.setattr(sessions, "scoot_installed", lambda: True)
+    out = {"models": [], "errors": {"ollama": "could not connect\n to http://localhost:11434",
+                                    "openai": "Incorrect API key provided: sk-x" + "y" * 400, "groq": ""}}
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps(out), ""))
+    assert cli.main(["status", "--json", "--agents"]) == 0
+    snap = json.loads(capsys.readouterr().out)
+    assert snap["scoot_models"] == []
+    assert snap["scoot_errors"]["ollama"] == "could not connect to http://localhost:11434"
+    assert len(snap["scoot_errors"]["openai"]) == sessions.SCOOT_ERROR_MAX and "groq" not in snap["scoot_errors"]
+    # no errors key at all (an older scoot): an empty map, and the models as before
+    out = {"models": [{"id": "ollama/qwen"}]}
+    assert cli.main(["status", "--json", "--agents"]) == 0
+    snap = json.loads(capsys.readouterr().out)
+    assert (snap["scoot_models"], snap["scoot_errors"]) == (["ollama/qwen"], {})
+    monkeypatch.setattr(sessions, "scoot_installed", lambda: False)
+    assert cli.main(["status", "--json", "--agents"]) == 0
+    snap = json.loads(capsys.readouterr().out)
+    assert (snap["scoot_models"], snap["scoot_errors"]) == (None, None)

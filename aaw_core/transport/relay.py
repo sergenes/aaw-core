@@ -231,6 +231,10 @@ class RelayTransport:
         self._send(dict(frame, req=req))
         try:
             return fut.result(timeout)
+        except TimeoutError:
+            # A timeout carries no text of its own, and "project read failed: " in a log
+            # reads like a fault. It is usually the computer waking for a moment in its sleep.
+            raise TimeoutError(f"no reply from the relay in {timeout:.0f} s") from None
         finally:
             with self._lock:
                 self._pending.pop(req, None)
