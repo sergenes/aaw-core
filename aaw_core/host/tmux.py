@@ -9,6 +9,7 @@ colon makes the target valid for pane and window commands too.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -83,6 +84,67 @@ def visible_pane(session: str) -> str:
     return strip_ansi(r.stdout) if r.returncode == 0 else ""
 
 
+# A dialog in a small terminal. A window tiler (tilewall) keeps the unfocused agents in
+# tiles of about 80x8, and Claude Code folds a menu into what fits: `/model` shows one
+# option between "↑ 1 more" and "↓ 4 more" with its title scrolled away, so nothing on
+# the screen says what the menu is or what it offers, and the phone got no card until
+# the tile was focused and grew (seen 2026-11-16). The options are not in the scrollback
+# either; the only way to read them is to give the agent room for a moment.
+SMALL_COLS, SMALL_ROWS = 100, 24      # below either, a dialog may be folded
+READ_COLS, READ_ROWS = 120, 40        # the room a dialog is read in
+REDRAW_S = 0.6                        # an agent redraws within this after a resize
+GROW_EVERY_S = 3.0                    # at most one resize per session in this long
+_DIALOG_FOOTER = re.compile(r"Esc to (cancel|exit|go back|close)|[↑↓] \d+ more")
+# session -> (the small screens this reading stands for, the reading, when it was taken)
+_readings: dict[str, tuple[set[str], str, float]] = {}
+
+
+def _window_size(session: str) -> tuple[int, int] | None:
+    try:
+        r = tmux_run(["display-message", "-p", "-t", session, "#{window_width} #{window_height}"],
+                     capture_output=True, text=True, timeout=5)
+        cols, rows = (int(v) for v in r.stdout.split())
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    return cols, rows
+
+
+def dialog_pane(session: str) -> str:
+    """The visible pane, read with room when a small terminal folds a dialog: what the
+    dialog detectors get. The window grows for a moment and returns to the size its
+    terminal gives it, so the tile flickers once per dialog, not on every poll: the
+    reading is kept for as long as the small screen stays the same."""
+    pane = visible_pane(session)
+    if not pane or not _DIALOG_FOOTER.search("\n".join(pane.rstrip().splitlines()[-4:])):
+        _readings.pop(session, None)
+        return pane
+    size = _window_size(session)
+    if size is None or (size[0] >= SMALL_COLS and size[1] >= SMALL_ROWS):
+        _readings.pop(session, None)
+        return pane
+    seen, reading, at = _readings.get(session, (set(), "", 0.0))
+    if pane in seen:
+        return reading
+    if reading and time.monotonic() - at < GROW_EVERY_S:
+        return reading  # the dialog is changing fast (a cursor moving); do not thrash the window
+    try:
+        grown = tmux_run(["resize-window", "-t", session, "-x", str(max(size[0], READ_COLS)),
+                          "-y", str(max(size[1], READ_ROWS))], capture_output=True, timeout=5)
+        if grown.returncode != 0:
+            return pane
+        time.sleep(REDRAW_S)
+        reading = visible_pane(session)
+    finally:
+        # Back to the size the attached terminal gives it, and following it again: -A
+        # alone leaves window-size at "manual", and the tile would stop resizing.
+        tmux_run(["resize-window", "-A", "-t", session], capture_output=True, timeout=5)
+        tmux_run(["set-window-option", "-u", "-t", session, "window-size"], capture_output=True, timeout=5)
+    time.sleep(REDRAW_S)
+    # The agent may redraw the folded dialog a line off from before: both stand for it.
+    _readings[session] = ({pane, visible_pane(session)}, reading or pane, time.monotonic())
+    return reading or pane
+
+
 def _paste(text: str, session: str) -> tuple[bool, str]:
     """Deliver text as one bracketed paste via a tmux buffer. Returns (ok, stderr)."""
     buf = f"aaw-{os.getpid()}"
@@ -113,7 +175,7 @@ def send_text(text: str, session: str, agent: str = "claude") -> bool:
         except (OSError, subprocess.SubprocessError) as e:
             return False, f"{type(e).__name__}: {e}"
 
-    if dialog_is_open(visible_pane(session), agent):
+    if dialog_is_open(dialog_pane(session), agent):
         print("[daemon] not typing: a dialog is open in the pane", flush=True)
         return False
     use_paste = ("\n" in text) or len(text) > 200

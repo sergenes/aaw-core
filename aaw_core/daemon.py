@@ -230,7 +230,7 @@ def handle_command(cmd: dict, transport: RelayTransport, settings: Settings, *, 
     # eaten by it, so queue it; the answer paths flush it once the dialog is gone.
     if command == "text" and args and not args.startswith("/"):
         try:
-            if detect.dialog_is_open(tmux.visible_pane(session), agent):
+            if detect.dialog_is_open(tmux.dialog_pane(session), agent):
                 # Encrypted, as the contract says: the relay must not hold a prompt in the
                 # clear (it did until 0.1.16). With its sender, as the relay stamped the
                 # command, for the echo later.
@@ -310,7 +310,7 @@ def handle_command(cmd: dict, transport: RelayTransport, settings: Settings, *, 
 def answer_mcp_dialog(session: str, answer: str) -> bool:
     """Apply the phone's answer to Claude Code's MCP server dialog as it is on screen now.
     False when the dialog is gone or the answer is not one of its options."""
-    dialog = detect.detect_claude_mcp_dialog(tmux.visible_pane(session))
+    dialog = detect.detect_claude_mcp_dialog(tmux.dialog_pane(session))
     if not dialog or answer not in dialog["options"]:
         return False
     if dialog["mode"] == "menu":
@@ -597,7 +597,8 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
                 tmux_gone = 0
 
             if alive:
-                pane = tmux.visible_pane(session)
+                # With room when a small terminal folds a dialog (tmux.dialog_pane).
+                pane = tmux.dialog_pane(session)
                 watch_for_refusal(transport, settings, agent, pane, turn_watch)
 
                 # ── Claude Code "trust this folder" dialog ─────────────────
@@ -951,7 +952,7 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
                     idle_since, idle_written = None, False  # a command just went in; not idle yet
                     # Any phone interaction re-checks a stuck permission prompt, bypassing the
                     # hash dedup, so the user can answer even after the first card expired.
-                    stuck = detect.detect_permission_prompt(tmux.visible_pane(session))
+                    stuck = detect.detect_permission_prompt(tmux.dialog_pane(session))
                     if stuck:
                         if perm_question_id and stuck["hash"] == perm_hash:
                             if may_auto_approve(stuck):
