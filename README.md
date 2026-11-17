@@ -90,6 +90,22 @@ aaw uninstall                       # remove the service, the hooks, the shell l
 
 `aaw --help` lists every command, and `aaw <command> --help` its options.
 
+## When the terminal window is gone
+
+A session runs inside tmux, not inside the terminal window that shows it.
+If the window freezes, is closed, or its SSH connection drops, the agent keeps working and the phone keeps following it.
+
+To look at the session again, from any terminal:
+
+```bash
+aaw status                          # the names of the running sessions
+tmux attach -t =aaw-my-project      # join one (the session's name with aaw- in front)
+```
+
+With the shell integration, typing the agent's name (`claude`, `codex`, ...) in the project folder does the same: it joins the session that already runs there instead of starting a second one.
+A window that stopped responding can simply be closed; that does not stop the session.
+`aaw stop my-project` is what stops one.
+
 ## Running on a laptop
 
 A sleeping computer cannot run agents or reach the phone.
