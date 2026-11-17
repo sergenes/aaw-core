@@ -20,6 +20,8 @@ Frames are JSON text messages with a ``type``:
     share            {req, project_id, guest_token, label_enc?} (phone)    mint a guest token scoped to one session
     shares           {req, project_id?}                         (phone)    the guests of a session, or of every session
     revoke_share     {req, project_id, share_id}                (phone)    drop a guest (its sockets close)
+    notify_pause     {req, project_id, paused?}                 (phone)    set, or without `paused` read, this
+                                                                           phone's pause for a shared session
     command          {project_id, command}                      (either)   new command / prompt / answer
     command_update   {project_id, command_id, fields}           (either)
     command_delete   {project_id, command_id}                   (either)
@@ -39,7 +41,7 @@ Frames are JSON text messages with a ``type``:
     welcome {computer_id}; event {project_id, seq, event}; state; computer; command;
     command_update; command_delete; history {req, project_id, events}; commands {req, project_id, commands};
     project {req, project_id, fields}; projects {req, projects}; computer {req, fields}; clear_events {project_id};
-    project_delete {project_id}; forgotten {req}; shares {req, project_id?, shares[{id, project_id, label_enc, platform, created, last_seen}]};
+    project_delete {project_id}; forgotten {req}; notify_pause {req, project_id, paused}; shares {req, project_id?, shares[{id, project_id, label_enc, platform, created, last_seen}]};
     request {req, kind, payload} (to the computer); response {req, kind, payload} (to the phones;
     the relay itself answers {error: "offline"} when no computer socket is live);
     pong; error {message} (then the socket closes)
@@ -74,6 +76,18 @@ fields itself is dropped. A ``command_update`` that rewrites the prompt (``paylo
 moves the sender to whoever wrote it, and a ``pending_message`` set through ``state``
 is stamped the same way with ``pending_from``, ``pending_from_label_enc`` and
 ``pending_from_platform``.
+
+Since 0.1.18 a phone may pause the notifications of a shared session for the turns
+somebody else started (``notify_pause``, kept per phone token and session). A turn
+belongs to whoever sent the prompt that started it: a guest (its share id), the owner
+(any unscoped phone), or nobody on a phone (typed at the computer, sent by the
+computer's own tools, or scheduled), and the relay reads that from the feed: the last
+user message that is not an answer, by its ``from`` and its ``command_id``. A paused
+phone is not pushed an event of somebody else's turn, and its live sockets receive
+that event with ``quiet: true`` so the app posts no banner of its own. The sender of
+a prompt is always notified, and a turn nobody on a phone started notifies everyone.
+To tell a phone's command from the computer's, a command a phone wrote is stored and
+forwarded with ``via: "phone"``, which, like the sender fields, only the relay writes.
 
 Abuse limits (the ``Abuse limits`` constants): incoming frames are capped in size
 and per-connection rate, a socket must say hello within a deadline, history
@@ -141,6 +155,9 @@ CREATE TABLE IF NOT EXISTS projects (
   PRIMARY KEY (computer_id, project_id));
 CREATE TABLE IF NOT EXISTS computers (computer_id TEXT PRIMARY KEY, doc TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS pauses (
+  token TEXT NOT NULL, computer_id TEXT NOT NULL, project_id TEXT NOT NULL,
+  PRIMARY KEY (token, project_id));
 """
 
 # The store's on-disk format. 2 hashes the device and cursor tokens at rest; a relay
@@ -168,7 +185,7 @@ PHONE_STATE_FIELDS = {"auto_approve", "pending_message"}
 
 # The frames a session-scoped guest may send, each checked against its project_id.
 GUEST_SESSION_FRAMES = frozenset({"subscribe", "ack", "history", "commands", "command", "command_update",
-                                  "command_delete", "project", "state"})
+                                  "command_delete", "project", "state", "notify_pause"})
 
 # The requests a guest may make (0.1.16). Each reaches the computer under its own kind,
 # `guest_<kind>`, with `scope`, the guest's session: an engine older than 0.1.16 does not
@@ -184,6 +201,19 @@ GUEST_REQUESTS_OPEN_MAX = 64         # per guest socket; the oldest is forgotten
 SENDER_FIELDS = ("from", "from_label_enc", "from_platform")
 # The same for a message a guest queued behind an open dialog (the project document).
 PENDING_SENDER_FIELDS = ("pending_from", "pending_from_label_enc", "pending_from_platform")
+# What a phone may not say about a command: who sent it, and that a phone did (0.1.18).
+RELAY_COMMAND_FIELDS = (*SENDER_FIELDS, "via")
+
+# Whose turn it is (0.1.18), for a phone that paused a shared session's notifications:
+# a guest's share id, OWNER_TURN for any unscoped phone, EVERYONES_TURN when nobody on
+# a phone started it.
+OWNER_TURN = "owner"
+EVERYONES_TURN = ""
+
+
+def _turn_identity(token: str, scope: str) -> str:
+    """Who a phone token is in a session's turns: its share id as a guest, else the owner."""
+    return token[:SHARE_ID_LEN] if scope else OWNER_TURN
 
 # ── Abuse limits ─────────────────────────────────────────────────────────────
 # The relay is internet-facing and registration is trust on first use, so every limit
@@ -682,9 +712,11 @@ class Relay:
             "projects": self._on_projects, "request": self._on_request, "response": self._on_response,
             "project_delete": self._on_project_delete, "forget_phone": self._on_forget_phone,
             "share": self._on_share, "shares": self._on_shares, "revoke_share": self._on_revoke_share,
+            "notify_pause": self._on_notify_pause,
         }.get(kind)
         if handler is None:
-            await conn.send({"type": "error", "message": f"unknown frame type {kind!r}"})
+            # With its `req`, so a client asking a relay older than itself learns at once.
+            await conn.send({"type": "error", "message": f"unknown frame type {kind!r}", "req": frame.get("req")})
             return
         if conn.scope and not self._guest_may(conn, kind, frame):
             await conn.send({"type": "error", "message": "not allowed for a shared session", "req": frame.get("req")})
@@ -746,20 +778,65 @@ class Relay:
                 (event["id"], conn.computer_id, project_id, seq, int(event.get("ts", 0)), event.get("type", ""),
                  payload_json, _now_s() + EVENT_TTL_DAYS * 86400))
             await self.db.commit()
-        live_tokens = {c.token for c in self._peers(conn.computer_id, role="phone")}
-        await self._forward(conn.computer_id, {"type": "event", "project_id": project_id,
-                                               "seq": seq, "event": event}, role="phone")
+        out = {"type": "event", "project_id": project_id, "seq": seq, "event": event}
         if not pushes(event):
+            await self._forward(conn.computer_id, out, role="phone")
             return
+        # A phone that paused this session is not told about somebody else's turn: no
+        # push, and its live sockets get the event marked quiet (no banner from the app).
+        quiet = await self._quiet_tokens(conn.computer_id, project_id)
+        peers = self._peers(conn.computer_id, role="phone", frame=out)
+        await asyncio.gather(*(self._send_to(c, {**out, "quiet": True} if c.token in quiet else out)
+                               for c in peers))
+        live_tokens = {c.token for c in peers if c.token not in quiet}
         if not live_tokens:
-            await self._push(conn.computer_id, project_id, event)
+            await self._push(conn.computer_id, project_id, event, quiet=quiet)
             return
-        task = asyncio.create_task(self._push_unless_acked(conn.computer_id, project_id, seq, event, live_tokens))
+        task = asyncio.create_task(
+            self._push_unless_acked(conn.computer_id, project_id, seq, event, live_tokens, quiet))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
+    async def _turn_starter(self, computer_id: str, project_id: str, before_seq: int | None = None) -> str:
+        """Whose turn the session is in: who sent the last prompt in its feed (an answer
+        to a question starts no turn). ``before_seq`` asks about an older event."""
+        row = await self._fetchone(
+            "SELECT payload FROM events WHERE computer_id=? AND project_id=? AND type='message'"
+            " AND seq<? AND json_extract(payload,'$.role')='user'"
+            " AND json_extract(payload,'$.question_id') IS NULL ORDER BY seq DESC LIMIT 1",
+            (computer_id, project_id, before_seq if before_seq is not None else 1 << 62))
+        if row is None:
+            return EVERYONES_TURN
+        prompt = json.loads(row["payload"])
+        command_id = prompt.get("command_id")
+        command = None
+        if isinstance(command_id, str) and command_id:
+            found = await self._fetchone("SELECT doc FROM commands WHERE id=? AND computer_id=?",
+                                         (command_id, computer_id))
+            command = json.loads(found["doc"]) if found else None
+        if command is not None and command.get("deliver_at"):
+            return EVERYONES_TURN  # a scheduled prompt: nobody is holding a phone for it
+        sender = prompt.get("from") or (command or {}).get("from")
+        if isinstance(sender, str) and sender:
+            return sender
+        return OWNER_TURN if command is not None and command.get("via") == "phone" else EVERYONES_TURN
+
+    async def _quiet_tokens(self, computer_id: str, project_id: str, before_seq: int | None = None) -> set[str]:
+        """The phone tokens that are not to be notified of this session's current turn:
+        those that paused it, minus whoever started the turn. Empty for a turn nobody on
+        a phone started."""
+        rows = await self._fetchall(
+            "SELECT p.token, d.scope FROM pauses p JOIN devices d ON d.token=p.token"
+            " WHERE p.computer_id=? AND p.project_id=?", (computer_id, project_id))
+        if not rows:
+            return set()
+        starter = await self._turn_starter(computer_id, project_id, before_seq)
+        if starter == EVERYONES_TURN:
+            return set()
+        return {r["token"] for r in rows if _turn_identity(r["token"], r["scope"]) != starter}
+
     async def _push_unless_acked(self, computer_id: str, project_id: str, seq: int, event: dict,
-                                 live_tokens: set[str]) -> None:
+                                 live_tokens: set[str], quiet: set[str] = frozenset()) -> None:
         """Wait for the live phones to ack the event; push everyone who did not."""
         waiter = _AckWaiter(seq=seq, expected=live_tokens)
         key = (computer_id, project_id)
@@ -774,10 +851,10 @@ class Relay:
                 waiters.remove(waiter)
             if not waiters:
                 self._ack_waiters.pop(key, None)
-        await self._push(computer_id, project_id, event, skip_tokens=waiter.acked)
+        await self._push(computer_id, project_id, event, skip_tokens=waiter.acked, quiet=quiet)
 
     async def _push(self, computer_id: str, project_id: str, event: dict,
-                    skip_tokens: set[str] = frozenset()) -> None:
+                    skip_tokens: set[str] = frozenset(), quiet: set[str] = frozenset()) -> None:
         # A permission question under auto_approve is answered on the computer within a
         # second; waking the phone for it would only ring for nothing. A "choice" question
         # (custom options) always needs a person, so it pushes regardless.
@@ -798,9 +875,15 @@ class Relay:
         # One phone may hold several tokens (one per scan), all with its one push token: one
         # push per phone, and none at all when any of its tokens acked the event on screen.
         on_screen = {r["push_token"] for r in rows if r["token"] in skip_tokens}
+        # The same for a pause: it is the phone's, whichever of its tokens set it.
+        paused = {r["push_token"] for r in rows if r["token"] in quiet}
         pushed: set[str] = set()
         what = f"{event.get('type', '')} {payload.get('level') or payload.get('kind') or ''}".strip()
         for r in rows:
+            if r["push_token"] in paused:
+                log.info("push skipped for phone %s (paused, somebody else's turn): %s in %s", _short(r["token"]),
+                         what, project_id)
+                continue
             if r["token"] in skip_tokens or r["push_token"] in on_screen:
                 # this phone acked the event: it is on screen
                 log.info("push skipped for phone %s (acked on screen): %s in %s", _short(r["token"]), what, project_id)
@@ -859,8 +942,8 @@ class Relay:
         if conn.role != "phone":
             return
         async with self.write_lock:
-            await self.db.execute("DELETE FROM devices WHERE token=?", (conn.token,))
-            await self.db.execute("DELETE FROM cursors WHERE token=?", (conn.token,))
+            for table in ("devices", "cursors", "pauses"):
+                await self.db.execute(f"DELETE FROM {table} WHERE token=?", (conn.token,))
             await self.db.commit()
         log.info("phone %s forgotten by its own request (unlink), computer %s", _short(conn.token), conn.computer_id)
         await conn.send({"type": "forgotten", "req": frame.get("req")})
@@ -909,8 +992,8 @@ class Relay:
             (conn.computer_id, project_id, len(share_id), share_id))
         for r in rows:
             async with self.write_lock:
-                await self.db.execute("DELETE FROM devices WHERE token=?", (r["token"],))
-                await self.db.execute("DELETE FROM cursors WHERE token=?", (r["token"],))
+                for table in ("devices", "cursors", "pauses"):
+                    await self.db.execute(f"DELETE FROM {table} WHERE token=?", (r["token"],))
                 await self.db.commit()
             for peer in [c for c in self.live.get(conn.computer_id, {}).values() if c.token == r["token"]]:
                 self.live.get(conn.computer_id, {}).pop(peer.id, None)
@@ -937,11 +1020,33 @@ class Relay:
             reply["project_id"] = project_id
         await conn.send(reply)
 
+    async def _on_notify_pause(self, conn: Conn, frame: dict) -> None:
+        """A phone pauses, resumes or reads its own pause for one session: while paused it
+        is notified only of the turns it started itself (and of those nobody on a phone
+        started). Kept per token, so it is this phone's alone and lasts until it resumes."""
+        if conn.role != "phone":
+            return
+        project_id, paused = frame.get("project_id"), frame.get("paused")
+        if _bad_str(project_id, "project_id") or not (paused is None or isinstance(paused, bool)):
+            await conn.send({"type": "error", "message": "invalid pause", "req": frame.get("req")})
+            return
+        key = (conn.token, conn.computer_id, project_id)
+        if paused is True:
+            await self._exec("INSERT OR REPLACE INTO pauses(token, computer_id, project_id) VALUES(?,?,?)", key)
+        elif paused is False:
+            await self._exec("DELETE FROM pauses WHERE token=? AND computer_id=? AND project_id=?", key)
+        if paused is not None:
+            log.info("phone %s %s the notifications of session %s", _short(conn.token),
+                     "paused" if paused else "resumed", project_id)
+        row = await self._fetchone("SELECT 1 FROM pauses WHERE token=? AND computer_id=? AND project_id=?", key)
+        await conn.send({"type": "notify_pause", "req": frame.get("req"), "project_id": project_id,
+                         "paused": row is not None})
+
     async def _on_project_delete(self, conn: Conn, frame: dict) -> None:
         """Forget a session: its document, feed, commands and cursors (the phone's "remove")."""
         project_id = frame["project_id"]
         async with self.write_lock:
-            for table in ("projects", "events", "commands", "cursors", "seqs"):
+            for table in ("projects", "events", "commands", "cursors", "seqs", "pauses"):
                 await self.db.execute(f"DELETE FROM {table} WHERE computer_id=? AND project_id=?",
                                       (conn.computer_id, project_id))
             await self.db.commit()
@@ -966,8 +1071,10 @@ class Relay:
             await conn.send({"type": "error", "message": "invalid command"})
             return
         if conn.role == "phone":
-            # What a phone claims about the sender is dropped; a guest's command is stamped.
-            doc = {k: v for k, v in doc.items() if k not in SENDER_FIELDS}
+            # What a phone claims about the sender is dropped; a guest's command is stamped,
+            # and every phone's is marked as a phone's (whose turn it starts, 0.1.18).
+            doc = {k: v for k, v in doc.items() if k not in RELAY_COMMAND_FIELDS}
+            doc["via"] = "phone"
             if conn.scope:
                 doc.update({k: v for k, v in (await self._sender(conn)).items() if v})
         doc_json = json.dumps(doc)
@@ -998,7 +1105,7 @@ class Relay:
             # The sender follows whoever last wrote the prompt itself: a guest who edits a
             # queued prompt becomes its sender, the owner editing a guest's takes it back,
             # and a change of time or status leaves the sender alone.
-            fields = {k: v for k, v in fields.items() if k not in SENDER_FIELDS}
+            fields = {k: v for k, v in fields.items() if k not in RELAY_COMMAND_FIELDS}
             if "payload" in fields:
                 fields.update(await self._sender(conn))
         doc = json.loads(row["doc"])
@@ -1035,9 +1142,13 @@ class Relay:
             "SELECT id, seq, ts, type, payload FROM events WHERE computer_id=? AND project_id=? AND seq>? ORDER BY seq",
             (conn.computer_id, project_id, after))
         for r in rows:
-            await conn.send({"type": "event", "project_id": project_id, "seq": r["seq"],
-                             "event": {"id": r["id"], "type": r["type"], "ts": r["ts"],
-                                       "payload": json.loads(r["payload"])}})
+            out = {"type": "event", "project_id": project_id, "seq": r["seq"],
+                   "event": {"id": r["id"], "type": r["type"], "ts": r["ts"], "payload": json.loads(r["payload"])}}
+            # An event this phone missed is replayed as quietly as it would have arrived.
+            if pushes(out["event"]) and conn.token in await self._quiet_tokens(conn.computer_id, project_id,
+                                                                              before_seq=r["seq"]):
+                out["quiet"] = True
+            await conn.send(out)
 
     async def _on_ack(self, conn: Conn, frame: dict) -> None:
         if conn.role != "phone":
