@@ -241,8 +241,11 @@ def test_a_guests_message_queued_behind_a_dialog_keeps_its_sender(monkeypatch, t
     # the dialog is answered: the message goes in, attributed, and the queue is cleared
     daemon.flush_pending_message(t, "aaw-p", "claude")
     assert typed == [TYPED]
-    assert t.events == [({"role": "user", "content": "fix the test", "agent": "claude", **ANNA_FEED}, TYPED)]
+    # with the id of the command that carried it (0.1.18), like a prompt that did not wait
+    assert t.events == [({"role": "user", "content": "fix the test", "agent": "claude", **ANNA_FEED,
+                          "command_id": "cmd-1"}, TYPED)]
     assert (t.doc["pending_message"], t.doc["pending_from"], t.doc["pending_from_label_enc"]) == ("", "", "")
+    assert t.doc["pending_command_id"] == ""
     # the owner's next queued message leaves no guest behind
     run_command(t, text_command("mine"), tmp_path)
     assert (decrypt(t.doc["pending_message"], KEY), t.doc["pending_from"]) == ("mine", "")

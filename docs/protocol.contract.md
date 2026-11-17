@@ -55,6 +55,9 @@ The plaintext copy of every event is appended to `<state dir>/sessions/<session 
   The relay writes these and a phone cannot: whatever a phone puts in them is dropped, and the owner's commands carry none.
   A `command_update` whose `fields` rewrite `payload` moves the sender to whoever wrote it (a guest's fields are stamped, the owner's are set to `""`); a change of `deliver_at` or `status` leaves the sender alone.
   The share id is the first 16 hex characters of the SHA-256 of the guest's token, so a guest app can tell its own messages from another guest's.
+- Sent from a phone, since 0.1.18: the relay stores and forwards every command a phone wrote with `via: "phone"`; a command from the computer's own tools (`aaw send`, the Mac's Session Feed) carries none.
+  Like the sender fields, only the relay writes it.
+  It tells the relay whose turn a prompt starts (see "Pausing a shared session's notifications").
 - A guest's prompt is typed into the agent behind a short note of who wrote it, `[from guest Anna] ` (or `[from a guest] ` when the share has no label), so the agent can tell the owner from a guest. The feed shows the text as written, with the sender in `from` and `from_label`. A slash command is typed bare, and an answer to a question is not prefixed (the agent sees only the choice); both are attributed in the feed all the same.
 
 ## 4. The project document (one per session)
@@ -73,6 +76,7 @@ Merged field by field (`state` frames); the phone renders the session card from 
 | `pending_question_id` | the event id of the open question, or `""` |
 | `auto_approve` | phone-set: yes/no permission prompts are answered "yes" by the daemon |
 | `pending_message` | a prompt queued while a dialog was open (encrypted by the writer; the daemon wrote its own in the clear until 0.1.16) |
+| `pending_command_id` | since 0.1.18, the id of the command that carried `pending_message`, so its echo names its command like any other prompt's |
 | `pending_from`, `pending_from_label_enc`, `pending_from_platform` | since 0.1.16, who queued `pending_message`: the relay stamps them when a guest sets it through `state` and empties them when the owner's phone does; the daemon writes them itself when it queues a command, and clears them once the message is typed |
 | `scheduled_count`, `next_scheduled_at` | the scheduled-prompt badge |
 
@@ -118,7 +122,17 @@ On unlink, or when the user removes the computer, it sends `forget_phone {req}` 
 Session sharing (relay store version 4, 0.1.13).
 An unscoped phone mints a guest with `share {req, project_id, guest_token, label_enc?}` (the token is its own random value; `label_enc` is the owner's name for the guest, encrypted), lists them with `shares {req, project_id}` (without `project_id`: every guest on the computer, the owner's overview), and drops one with `revoke_share {req, project_id, share_id}`; each is answered with `shares {req, project_id?, shares[{id, project_id, label_enc, platform, created, last_seen}]}`, and a revoked guest's sockets are closed with `error {message: "access revoked"}`.
 A guest's `welcome` carries `scope`, its project id.
-The relay accepts from a guest only `ping`, `forget_phone`, `computer`, `projects` (filtered to its session), `subscribe`, `ack`, `history`, `commands`, `command`, `command_update`, `command_delete`, `project` and `state` carrying its project id, and since 0.1.16 the file requests below; anything else, the session requests and `project_delete` included, is answered with `error {message: "not allowed for a shared session", req}`.
+The relay accepts from a guest only `ping`, `forget_phone`, `computer`, `projects` (filtered to its session), `subscribe`, `ack`, `history`, `commands`, `command`, `command_update`, `command_delete`, `project`, `state` and (0.1.18) `notify_pause` carrying its project id, and since 0.1.16 the file requests below; anything else, the session requests and `project_delete` included, is answered with `error {message: "not allowed for a shared session", req}`.
+Pausing a shared session's notifications, since 0.1.18.
+A phone, the owner's or a guest's, sets its own pause for one session with `notify_pause {req, project_id, paused: true | false}` and reads it by leaving `paused` out; both are answered with `notify_pause {req, project_id, paused}`.
+The pause belongs to that phone token and that session, lasts until the phone resumes it, and goes when the token is unlinked or revoked or the session is deleted.
+A relay before 0.1.18 answers `error {message: "unknown frame type 'notify_pause'"}` (with `req` only since 0.1.18, so a client should also treat a timeout as "the relay is too old").
+While paused, the phone is notified only of the turns it started itself.
+A turn belongs to whoever sent the prompt that started it, and the relay reads that from the feed: the last `message` with `role: user` and no `question_id` (an answer starts no turn).
+With a `from` it is that guest's turn; with a `command_id` whose command carries `via: "phone"` and no `from` it is the owner's (every unscoped phone is the owner); typed at the computer, sent by the computer's own tools, or scheduled (`deliver_at`), it is nobody's, and everyone is notified whatever they paused.
+For an event of somebody else's turn that would wake a phone (a `question`, a `notification` at `success`, `error` or `warning`), a paused phone gets no push, and its live sockets receive the `event` frame with `quiet: true`: the app shows it in the feed and posts no banner.
+The same holds for a missed event replayed after `subscribe`.
+The rule is the relay's alone; a phone only sets the pause and honors `quiet`.
 A guest's files, since 0.1.16: a guest may send `request` with kind `fs_browse`, `fs_fetch` or `fs_attach`, written exactly as an owner's phone writes them.
 The relay cannot judge a path (it crosses the relay encrypted), so the fence is the computer's: the relay forwards the request as kind `guest_<kind>` with one more field, `scope` (the guest's project id), under a request id of its own, and the supervisor serves `fs_browse` and `fs_fetch` with that session's folder as the only root.
 The root listing is the folder itself (`at_root`, no parent), a path outside it or a link that leaves it answers `outside_roots`, and a scope with no known session or folder answers `denied`.
