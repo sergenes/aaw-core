@@ -66,6 +66,7 @@ The daemon reads the pane twice a second.
 When it recognizes a permission prompt (or an AskUserQuestion, a multi-select, Cursor's native prompt) it writes a `question` event, sets the project `waiting`, and polls for an `answer` command whose `question_id` matches; the answer becomes key presses in the pane.
 With `auto_approve` set on the project document, a yes/no prompt is answered "yes" on the computer without a round trip.
 Hooks cover the same ground for agents whose PreToolUse hook can block (Claude Code, Codex, Gemini, scoot): `on_pre_tool` asks the phone and returns the decision to the agent.
+A tool the agent itself never auto-approves (scoot's `web_search`) is asked on every call: `auto_approve` does not cover it, the card offers "Yes" and "No" only and is sent as a `choice` so it is pushed, and no answer in five minutes means the call is not run.
 
 ## Identity and state
 
