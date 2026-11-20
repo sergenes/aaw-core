@@ -136,7 +136,7 @@ def list_sessions() -> list[Session]:
         if len(parts) != 3 or not parts[0].startswith(TMUX_PREFIX) or parts[0] in seen:
             continue
         seen.add(parts[0])
-        out.append(Session(parts[0], parts[0][len(TMUX_PREFIX):], parts[2], parts[1] == "1"))
+        out.append(Session(parts[0], parts[0][len(TMUX_PREFIX):], parts[2], parts[1] not in ("", "0")))  # the count of attached clients
     return sorted(out, key=lambda s: s.project)
 
 

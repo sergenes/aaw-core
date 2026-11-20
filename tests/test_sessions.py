@@ -97,3 +97,12 @@ def test_log_rotation(settings):
     log.write_bytes(b"x" * (sessions.LOG_ROTATE_BYTES + 1))
     sessions._rotate_log(log)
     assert not log.exists() and log.with_suffix(".log.1").exists()
+
+
+def test_list_sessions_counts_any_number_of_windows_as_attached(monkeypatch):
+    """#{session_attached} is the number of clients, not a flag: until 0.1.20 a session
+    open in two terminal windows read as detached."""
+    out = "aaw-one|1|/p/one\naaw-two|2|/p/two\naaw-none|0|/p/none\nother|1|/p/other\n"
+    monkeypatch.setattr(sessions.tmux, "tmux_run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=out, stderr=""))
+    assert {s.project: s.attached for s in sessions.list_sessions()} == {"one": True, "two": True, "none": False}

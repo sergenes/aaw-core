@@ -152,10 +152,17 @@ def test_build_question():
     assert on_pre_tool.build_question("MCP:web_search", {"query": "aaw"}) == "Allow web_search? (aaw)"
     assert on_pre_tool.build_question("MCP:thing", {}) == "Allow thing?"
     assert on_pre_tool.build_question("Glob", {}) == "Allow Glob?"
+    # scoot's own tool names and its "path" argument
+    assert on_pre_tool.build_question("run_shell", {"command": " ls -la "}) == "Run: ls -la"
+    assert on_pre_tool.build_question("write_file", {"path": "a.py", "content": "x"}) == "Create / overwrite: a.py"
+    assert on_pre_tool.build_question("edit_file", {"path": "b.py"}) == "Edit: b.py"
+    assert on_pre_tool.build_question("open_editor", {"path": "c.py"}) == "Open in the editor: c.py"
+    assert on_pre_tool.build_question("web_search", {"query": " aaw\n app ", "count": 3}) == "Search the web: aaw app"
+    assert on_pre_tool.build_question("web_search", {}) == "Search the web?"
 
 
 def test_readonly_tools_are_approved_without_a_transport(settings):
-    for agent, tool in (("gemini", "read_file"), ("grok", "web_search")):
+    for agent, tool in (("gemini", "read_file"), ("grok", "web_search"), ("scoot", "read_file"), ("scoot", "search")):
         out, code = on_pre_tool.decide(settings, "p", agent, {"tool_name": tool, "tool_input": {}})
         assert code == 0 and json.loads(out) == json.loads(on_pre_tool.approve_output(agent)[0])
     # no relay configured: approve so the agent shows its own dialog path unchanged
@@ -209,6 +216,82 @@ def test_an_unanswered_question_clears_itself_and_leaves_a_trace(settings, monke
     assert level == "info"  # feed-only, never a push
     # the card's countdown must not promise more time than the hook will wait
     assert transport.question_kwargs.get("timeout_s") == on_pre_tool.ANSWER_TIMEOUT_S
+
+
+class _AnsweringTransport(_NoAnswerTransport):
+    """A transport with a project doc and a phone that answers."""
+
+    def __init__(self, doc=None, answer=None):
+        super().__init__()
+        self.doc = doc or {}
+        self.answer = answer
+        self.updates = []
+
+    def get_project(self):
+        return self.doc
+
+    def poll_answer(self, deadline):
+        return self.answer
+
+    def update_project(self, **fields):
+        self.updates.append(fields)
+
+
+_SCOOT_SEARCH = {"tool_name": "web_search", "tool_input": {"query": "aaw"}}
+
+
+def test_scoot_web_search_is_asked_on_every_call(settings, monkeypatch):
+    """scoot 0.15.0 never auto-approves web_search, and takes a global hook's "allow" as the
+    user's answer. Seen 2026-11-20 with 0.1.19: a bridged scoot ran the search with nobody
+    asked. The session's auto-approve must not cover it, and the card offers one call only."""
+    transport = _AnsweringTransport(doc={"auto_approve": True}, answer="Yes")
+    monkeypatch.setattr(on_pre_tool, "open_transport", lambda s, p: transport)
+    out, code = on_pre_tool.decide(settings, "p", "scoot", dict(_SCOOT_SEARCH))
+    assert transport.question_kwargs is not None, "auto-approve answered a tool that always asks"
+    assert transport.question_kwargs["question"] == "Search the web: aaw"
+    assert transport.question_kwargs["options"] == ["Yes", "No"]
+    assert transport.question_kwargs["kind"] == "choice"  # pushed even while the session auto-approves
+    assert json.loads(out) == {"permissionDecision": "allow"} and code == 0
+    assert transport.updates == []  # one "Yes" trusts nothing
+
+    # the same session still auto-approves an ordinary tool without asking
+    other = _AnsweringTransport(doc={"auto_approve": True})
+    monkeypatch.setattr(on_pre_tool, "open_transport", lambda s, p: other)
+    out, _ = on_pre_tool.decide(settings, "p", "scoot", {"tool_name": "run_shell", "tool_input": {"command": "ls"}})
+    assert other.question_kwargs is None and json.loads(out) == {"permissionDecision": "allow"}
+    asked = _AnsweringTransport(answer="Yes")
+    monkeypatch.setattr(on_pre_tool, "open_transport", lambda s, p: asked)
+    on_pre_tool.decide(settings, "p", "scoot", {"tool_name": "run_shell", "tool_input": {"command": "ls"}})
+    assert asked.question_kwargs["kind"] == "permission" and asked.question_kwargs["options"] == on_pre_tool.OPTIONS
+
+    # an old phone's "Yes for this session" approves this call and does not switch auto-approve on
+    stale = _AnsweringTransport(answer="Yes for this session")
+    monkeypatch.setattr(on_pre_tool, "open_transport", lambda s, p: stale)
+    out, _ = on_pre_tool.decide(settings, "p", "scoot", dict(_SCOOT_SEARCH))
+    assert json.loads(out) == {"permissionDecision": "allow"} and stale.updates == []
+
+    denied = _AnsweringTransport(answer="No")
+    monkeypatch.setattr(on_pre_tool, "open_transport", lambda s, p: denied)
+    out, _ = on_pre_tool.decide(settings, "p", "scoot", dict(_SCOOT_SEARCH))
+    assert json.loads(out)["permissionDecision"] == "deny"
+
+
+def test_scoot_web_search_is_not_run_when_nobody_answers(settings, monkeypatch):
+    transport = _NoAnswerTransport()
+    monkeypatch.setattr(on_pre_tool, "open_transport", lambda s, p: transport)
+    out, code = on_pre_tool.decide(settings, "p", "scoot", dict(_SCOOT_SEARCH))
+    assert json.loads(out)["permissionDecision"] == "deny" and code == 0
+    assert ("running", "") in transport.status_calls  # the card still dismisses
+    message, level = transport.notifications[0]
+    assert "No answer in 5 minutes; not run: Search the web: aaw" == message and level == "info"
+
+
+def test_scoot_web_search_without_a_relay_is_left_to_scoot(settings):
+    """Not linked: the hook says nothing, so scoot shows its own prompt (it always asks)."""
+    assert on_pre_tool.decide(settings, "p", "scoot", dict(_SCOOT_SEARCH)) == ("", 0)
+    # the name means nothing for another agent: Grok's web_search stays read-only
+    out, _ = on_pre_tool.decide(settings, "p", "grok", dict(_SCOOT_SEARCH))
+    assert json.loads(out) == json.loads(on_pre_tool.approve_output("grok")[0])
 
 
 # ── on_post_tool / on_user_prompt / on_notification ────────────────────────

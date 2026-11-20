@@ -27,6 +27,7 @@ from aaw_core.hooks.common import (
 )
 
 OPTIONS = ["Yes", "Yes for this session", "No"]
+ONE_CALL_OPTIONS = ["Yes", "No"]
 ANSWER_TIMEOUT_S = 300
 PENDING_WAIT_S = 300
 
@@ -34,6 +35,17 @@ PENDING_WAIT_S = 300
 READONLY = {
     "gemini": {"read_file", "list_directory", "search_files", "glob", "get_file_info", "list_files"},
     "grok": {"read_file", "list_dir", "grep", "web_search", "web_fetch", "glob"},
+    # A bridged scoot runs with --approval auto-read, so it would not ask for these itself.
+    "scoot": {"read_file", "list_dir", "search", "update_plan"},
+}
+
+# Tools the agent itself never auto-approves, in any mode. Each call is asked on its own:
+# "Yes for this session" does not cover it, and no answer means no. scoot's web_search
+# (0.15.0) sends the query to a search instance and brings untrusted web text back; scoot
+# takes a global hook's "allow" as the user's answer, so an "allow" nobody gave (the
+# session's auto-approve, the 5 minute default, no relay) would run it unasked.
+ALWAYS_ASK = {
+    "scoot": {"web_search"},
 }
 
 
@@ -99,14 +111,19 @@ def normalize_payload(agent: str, payload: dict) -> dict:
 
 def build_question(tool_name: str, tool_input: dict) -> str:
     """The human-readable question on the permission card."""
-    file_path = tool_input.get("file_path", "")
+    file_path = tool_input.get("file_path") or tool_input.get("path") or ""  # scoot says "path"
     cmd = (tool_input.get("command") or "").strip()
     if tool_name in ("Write", "write_file"):
         return f"Create / overwrite: {file_path or 'a file'}"
-    if tool_name in ("Edit", "MultiEdit", "replace_in_file"):
+    if tool_name in ("Edit", "MultiEdit", "replace_in_file", "edit_file"):
         return f"Edit: {file_path or 'a file'}"
-    if tool_name in ("Bash", "run_shell_command", "Shell", "run_terminal_cmd"):
+    if tool_name in ("Bash", "run_shell_command", "Shell", "run_terminal_cmd", "run_shell"):
         return f"Run: {cmd[:140]}"
+    if tool_name == "open_editor":  # scoot: opens the file in the user's editor
+        return f"Open in the editor: {file_path or 'a file'}"
+    if tool_name == "web_search":
+        query = " ".join(str(tool_input.get("query") or "").split())
+        return f"Search the web: {query[:140]}" if query else "Search the web?"
     if tool_name == "search_replace":  # Grok's Edit
         return f"Edit: {tool_input.get('file_path', tool_input.get('path', '')) or 'a file'}"
     if tool_name.startswith("MCP:"):
@@ -124,11 +141,13 @@ def decide(settings: Settings, project: str, agent: str, payload: dict) -> tuple
     tool_input = payload.get("tool_input") or {}
     if tool_name in READONLY.get(agent, ()):
         return approve_output(agent)
+    always_ask = tool_name in ALWAYS_ASK.get(agent, ())
     question = build_question(tool_name, tool_input)
 
     transport = open_transport(settings, project)
     if transport is None:
-        return approve_output(agent)
+        # Not linked to a relay. Saying nothing leaves an always-ask tool to the agent's own prompt.
+        return ("", 0) if always_ask else approve_output(agent)
     try:
         try:
             doc = transport.get_project()
@@ -136,7 +155,7 @@ def decide(settings: Settings, project: str, agent: str, payload: dict) -> tuple
             hook_log(settings, "on_pre_tool", f"project read failed: {e}")
             doc = {}
         hook_log(settings, "on_pre_tool", f"mobile_mode=ON tool={tool_name!r} auto_approve={doc.get('auto_approve')!r}")
-        if doc.get("auto_approve"):
+        if doc.get("auto_approve") and not always_ask:
             return approve_output(agent)
 
         # Some agents fire more than one tool hook at once (Cursor: a Shell + Grep pair
@@ -157,8 +176,11 @@ def decide(settings: Settings, project: str, agent: str, payload: dict) -> tuple
                 hook_log(settings, "on_pre_tool", "pending question never cleared; sending anyway")
 
         hook_log(settings, "on_pre_tool", f"sending question to mobile: {question!r}")
-        transport.send_question(project=project, agent=agent, question=question, options=OPTIONS,
-                                timeout_s=ANSWER_TIMEOUT_S)
+        # An always-ask question goes out as a "choice": the relay and the phones stay quiet
+        # about a "permission" question while the session auto-approves, and this one needs a person.
+        transport.send_question(project=project, agent=agent, question=question,
+                                options=ONE_CALL_OPTIONS if always_ask else OPTIONS,
+                                kind="choice" if always_ask else "permission", timeout_s=ANSWER_TIMEOUT_S)
         answer = transport.poll_answer(time.time() + ANSWER_TIMEOUT_S)
         if answer is not None:
             refresh_mobile_mode(settings)  # answering counts as phone activity
@@ -170,12 +192,14 @@ def decide(settings: Settings, project: str, agent: str, payload: dict) -> tuple
             # leaving it set keeps a zombie card on the phone and makes the next
             # question wait out PENDING_WAIT_S behind the stale id.
             transport.set_project_status("running", pending_question_id="")
+            outcome = "not run" if always_ask else "approved and continued"
             transport.write_notification(
-                f"No answer in {ANSWER_TIMEOUT_S // 60} minutes; approved and continued: {question}",
-                level="info")
+                f"No answer in {ANSWER_TIMEOUT_S // 60} minutes; {outcome}: {question}", level="info")
+            if always_ask:
+                return block_output(agent, "No answer from the mobile app.")
         if answer == "No":
             return block_output(agent)
-        if answer == "Yes for this session":
+        if answer == "Yes for this session" and not always_ask:
             transport.update_project(auto_approve=True)
             transport.set_project_status("running", pending_question_id="")
         return approve_output(agent)
