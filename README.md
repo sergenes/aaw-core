@@ -90,6 +90,20 @@ aaw uninstall                       # remove the service, the hooks, the shell l
 
 `aaw --help` lists every command, and `aaw <command> --help` its options.
 
+## Agents that know about each other
+
+Sessions on one computer can share notes and send each other a message, with your approval each time.
+It is off until you turn it on with `aaw peers on`.
+
+- `aaw know` lists the shared notes, small files in `~/.aaw/knowledge` that every session can read. You can edit them by hand.
+- An agent proposes a note with `aaw know add`. You get a card with the whole note: Save or Don't save. A text that looks like a credential is refused.
+- `aaw peers` lists the running sessions. An agent proposes a message with `aaw tell <session> "<text>"`. You get one card with the sender, the receiver and the whole text: Send or Don't send.
+- An approved message arrives as a prompt that starts with `[from Claude in my-project, approved by the user]`. The answer returns to the sender on its own, as a prompt that starts with `[answer from ...]`. One card covers one message and its one answer.
+- Answer a card on the phone, or on the computer with `aaw answer <session> <option>`.
+
+Claude Code is told about these commands when its session starts. For another agent, put the lines above into its instructions.
+The card is not a security wall: an agent with a shell could type into another session's terminal. It is the agreed road for agents that follow instructions, and your view of what crosses between sessions.
+
 ## When the terminal window is gone
 
 A session runs inside tmux, not inside the terminal window that shows it.

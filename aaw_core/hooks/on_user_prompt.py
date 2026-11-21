@@ -6,6 +6,7 @@ Never blocks: it always exits 0 with no output, whatever happens.
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 
@@ -64,6 +65,12 @@ def main() -> int:
                     transport.write_event("message", {"role": "user", "content": text, "agent": agent}, via="hook")
             finally:
                 transport.stop()
+    # Codex and scoot learn at their first prompt that other sessions can be reached
+    # (`aaw peers on`): the hook's answer adds it to the model's context.
+    from aaw_core.hooks.on_session_start import told_block
+    block = told_block(settings, project, agent, str(payload.get("session_id") or payload.get("conversation_id") or ""))
+    if block:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": block}}))
     return 0
 
 

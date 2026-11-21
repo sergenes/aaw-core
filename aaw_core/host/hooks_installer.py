@@ -232,9 +232,12 @@ def update_gemini_hooks() -> Path:
     path = home() / ".gemini" / "settings.json"
     settings = _read_json(path)
     hooks = settings.get("hooks") if isinstance(settings.get("hooks"), dict) else {}
-    merge_hook(hooks, "BeforeTool", "on_pre_tool", matcher="*", timeout=PRE_TOOL_TIMEOUT)
-    merge_hook(hooks, "AfterAgent", "on_stop", timeout=30)
-    merge_hook(hooks, "SessionEnd", "on_stop", timeout=30)
+    # Gemini CLI counts a hook's timeout in milliseconds, the others in seconds. With 30
+    # written here its AfterAgent hook had 30 ms: Gemini reported it as failed at every
+    # turn, and with 360 ms the phone's answer to a tool card never reached the agent.
+    merge_hook(hooks, "BeforeTool", "on_pre_tool", matcher="*", timeout=PRE_TOOL_TIMEOUT * 1000)
+    merge_hook(hooks, "AfterAgent", "on_stop", timeout=30 * 1000)
+    merge_hook(hooks, "SessionEnd", "on_stop", timeout=30 * 1000)
     settings["hooks"] = hooks
     _write_json(path, settings)
     return path

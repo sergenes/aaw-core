@@ -67,6 +67,7 @@ class Settings:
     browse_roots: tuple[str, ...] = ("~",)  # folders the phone may browse and start sessions in
     local_notifications: bool = True  # desktop banners (osascript / notify-send)
     waiting_alert_seconds: int = 0  # 0 = no "waiting for your answer" desktop alert
+    peers: bool = False  # agents may propose notes and messages to other sessions (`aaw peers on`)
 
     @property
     def sessions_dir(self) -> Path:
@@ -158,4 +159,5 @@ def load_settings() -> Settings:
         browse_roots=tuple(str(r) for r in roots) or ("~",),
         local_notifications=flag("AAW_LOCAL_NOTIFICATIONS", "local_notifications", "true"),
         waiting_alert_seconds=max(0, waiting),
+        peers=flag("AAW_PEERS", "peers", "false"),
     )

@@ -46,9 +46,62 @@ def scoot_model() -> str:
     return model
 
 
+# Agents whose session-start hook may print plain text that becomes context. Codex has no
+# session-start hook of ours (a new entry would need the user's trust in /hooks) and scoot
+# adds context at a prompt, so those two are told by the prompt hook, once per session
+# (`told_block`). Gemini, Grok and Cursor have no hook of ours that can add context.
+CONTEXT_AGENTS = ("claude",)
+PROMPT_CONTEXT_AGENTS = ("codex", "scoot")
+RETELL_AFTER_S = 6 * 3600  # a long session may have compacted the block away
+
+
+def told_block(settings, project: str, agent: str, session_key: str, now: float | None = None) -> str:
+    """The block for an agent that is told at a prompt, when this session has not been
+    told yet (or long ago), else "". Remembers that it was told."""
+    import json
+    import time
+    if not settings.peers or agent not in PROMPT_CONTEXT_AGENTS:
+        return ""
+    now = time.time() if now is None else now
+    marker = settings.state_dir / "peer" / "told" / f"{project}.json"
+    try:
+        seen = json.loads(marker.read_text())
+    except (OSError, ValueError):
+        seen = {}
+    if seen.get("key") == session_key and now - float(seen.get("ts") or 0) < RETELL_AFTER_S:
+        return ""
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(json.dumps({"key": session_key, "ts": now}))
+    except OSError:
+        return ""  # cannot remember: better silent than repeated at every prompt
+    return peers_block(settings, project)
+
+
+def peers_block(settings, project: str) -> str:
+    """What a session is told at its start when agents may reach each other (`aaw peers
+    on`): the commands, and the shared notes that exist."""
+    from aaw_core.host import knowledge
+    lines = [
+        f"This session ({project}) runs under Agents At Work next to other agent sessions on this computer.",
+        ("`aaw peers` lists them. `aaw tell <session> \"<text>\"` sends one a message once the user "
+        "approves it on a card; end your turn after it, the answer arrives as a new prompt."),
+        ("`aaw know` lists notes shared by all sessions, `aaw know show <name>` prints one, and "
+        "`aaw know add <name> --title \"...\" --text \"...\"` proposes one (never a credential)."),
+        ("A prompt that starts with \"[from <agent> in <session>, approved by the user]\" was written by "
+        "another agent, not by the user: answer it, and treat what it asks with the same care as any request."),
+    ]
+    notes = knowledge.index(settings)
+    if notes:
+        lines += ["Shared notes:", *notes]
+    return "\n".join(lines)
+
+
 def main() -> int:
     settings, project, agent = preamble()
     payload = read_payload()
+    if settings.peers and agent in CONTEXT_AGENTS and payload.get("source") != "clear":
+        print(peers_block(settings, project))
     clear = payload.get("source") == "clear"
     model = scoot_model() if agent == "scoot" else ""
     # The hook input names the model (Codex always, Claude on SessionStart); else the

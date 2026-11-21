@@ -475,6 +475,8 @@ class RelayTransport:
         self._send({"type": "command_update", "project_id": self.project_id, "command_id": doc["id"],
                     "fields": {"consumed": True}})
         self.set_project_status("running", pending_question_id="")
+        # Who answered: {} for the owner, the guest's feed fields in a shared session.
+        self.last_answer_from = self.sender_of(doc)
         answer = self.decrypt_field(p["answer_enc"]) if p.get("answer_enc") else p.get("answer", "")
         # The answer's trace in the feed, once the question card is gone. The phone cannot
         # write events on the relay, so the computer does it. It carries its question (0.1.17):
@@ -554,6 +556,19 @@ class RelayTransport:
         doc = make_command(args, self._enc_key, deliver_at=deliver_at, status=status, source=source)
         with self._lock:
             self._inbox[doc["id"]] = doc
+        self._send({"type": "command", "project_id": self.project_id, "command": doc})
+        return doc["id"]
+
+    def write_answer(self, question_id: str, answer: str) -> str:
+        """Answer a pending question from this computer, as a phone would (0.1.23: `aaw
+        answer`, the Mac app's card). The relay hands it to the process that is waiting."""
+        payload = {"question_id": question_id, "answer": ""}
+        enc = self.encrypt_field(answer)
+        if enc and enc != answer:
+            payload["answer_enc"] = enc
+        else:
+            payload["answer"] = answer
+        doc = {"id": uuid.uuid4().hex, "type": "answer", "ts": now_ms(), "consumed": False, "payload": payload}
         self._send({"type": "command", "project_id": self.project_id, "command": doc})
         return doc["id"]
 

@@ -345,6 +345,8 @@ def start_session(settings: Settings, project_dir: Path, project: str, agent: st
         if not ok:
             raise SessionError(f"could not create the tmux session: {err}")
         out.append(f"  tmux session '{session}' started in {project_dir}")
+        # A new agent process knows nothing yet: it is told about the other sessions again.
+        (settings.state_dir / "peer" / "told" / f"{project}.json").unlink(missing_ok=True)
     out += start_daemon(settings, project_dir, project, agent)
     out += ["", f"session ready: {project}", f"  tmux session : {session}",
             f"  attach with  : {attach_command(project)}", f"  stop with    : aaw stop {project}"]
