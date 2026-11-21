@@ -132,10 +132,14 @@ class Supervisor:
             # Why scoot has no models from a provider (0.1.18), for the phone's agent picker.
             # Encrypted: a provider's error can quote part of a key or an account.
             errors = scoot[1] if scoot is not None else {}
+            # A newer scoot on PyPI (0.1.22), for the same picker. Encrypted: the update
+            # command can name the path of the Python that holds scoot.
+            update = sessions.scoot_update(self.settings) if scoot is not None else None
             self.transport.update_computer(
                 status="online", platform=platform_name(), detected_agents=hooks_installer.detected_agents(),
                 scoot_models=scoot[0] if scoot is not None else [],
-                scoot_errors_enc=self.transport.encrypt_field(json.dumps(errors, sort_keys=True)) if errors else "")
+                scoot_errors_enc=self.transport.encrypt_field(json.dumps(errors, sort_keys=True)) if errors else "",
+                scoot_update_enc=self.transport.encrypt_field(json.dumps(update, sort_keys=True)) if update else "")
         except Exception as e:  # noqa: BLE001 - a heartbeat must never stop the loop
             self.log(f"heartbeat failed: {e}")
 

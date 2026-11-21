@@ -448,3 +448,22 @@ def test_heartbeat_says_why_scoot_has_no_models_encrypted(sup, monkeypatch):
     sup.heartbeat()
     sent = sup.transport.computer_updates[-1]
     assert (sent["scoot_models"], sent["scoot_errors_enc"]) == (["ollama/qwen"], "")  # the reason is withdrawn
+
+
+def test_heartbeat_offers_a_newer_scoot_encrypted(sup, monkeypatch):
+    """0.1.22: the phone's agent picker says a newer scoot exists and how to update it."""
+    import json
+    offer = {"installed": "0.14.0", "latest": "0.16.0", "command": "/Users/me/venv/bin/python -m pip install --upgrade scootcli"}
+    monkeypatch.setattr(sessions, "scoot_status", lambda: (["ollama/qwen"], {}))
+    monkeypatch.setattr(sessions, "scoot_update", lambda settings: offer)
+    sup.heartbeat()
+    sent = sup.transport.computer_updates[-1]
+    assert "/Users/me" not in sent["scoot_update_enc"]
+    assert json.loads(decrypt(sent["scoot_update_enc"], KEY)) == offer
+    monkeypatch.setattr(sessions, "scoot_update", lambda settings: None)
+    sup.heartbeat()
+    assert sup.transport.computer_updates[-1]["scoot_update_enc"] == ""  # withdrawn once scoot is current
+    monkeypatch.setattr(sessions, "scoot_status", lambda: None)  # scoot is gone: nothing is asked
+    monkeypatch.setattr(sessions, "scoot_update", lambda settings: 1 / 0)
+    sup.heartbeat()
+    assert sup.transport.computer_updates[-1]["scoot_update_enc"] == ""

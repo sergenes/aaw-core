@@ -91,6 +91,7 @@ Merged field by field (`state` frames); the phone renders the session card from 
 | `detected_agents` | which agent CLIs are installed |
 | `scoot_models` | model ids scoot can serve |
 | `scoot_errors_enc` | since 0.1.18, why scoot has no models from a provider: an encrypted JSON object `{provider: message}` (Ollama not running, a rejected API key), `""` when every provider answered. `aaw status --json --agents` gives the same map in the clear as `scoot_errors` (`null` when scoot is not installed) |
+| `scoot_update_enc` | since 0.1.22, a newer scoot on PyPI than the one installed: an encrypted JSON object `{"installed", "latest", "command"}` (the command updates scoot the way it was installed, and is run on the computer), `""` when scoot is current, absent, a dev build, or the check is switched off (`AAW_NO_UPDATE_CHECK=1`). `aaw status --json --agents` gives the same object in the clear as `scoot_update` |
 | `daemon_version` | the aaw-core version |
 | `session_pct`, `weekly_pct`, `extra_pct` | Claude usage after `/usage` |
 
