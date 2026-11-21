@@ -101,7 +101,8 @@ It is off until you turn it on with `aaw peers on`.
 - An approved message arrives as a prompt that starts with `[from Claude in my-project, approved by the user]`. The answer returns to the sender on its own, as a prompt that starts with `[answer from ...]`. One card covers one message and its one answer.
 - Answer a card on the phone, or on the computer with `aaw answer <session> <option>`.
 
-Claude Code is told about these commands when its session starts. For another agent, put the lines above into its instructions.
+Every agent learns the commands by itself. Claude Code, Codex and scoot are told by a hook when a session starts.
+Gemini, Grok and Cursor have no hook that can, so `aaw peers on` writes the same words where each reads its global instructions, and `aaw peers off` removes them: a file of its own in `~/.grok/rules` and `~/.cursor/rules`, and a marked block in `~/.gemini/GEMINI.md` (the rest of that file is yours and is not touched).
 The card is not a security wall: an agent with a shell could type into another session's terminal. It is the agreed road for agents that follow instructions, and your view of what crosses between sessions.
 
 ## When the terminal window is gone

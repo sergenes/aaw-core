@@ -297,6 +297,9 @@ def install_all(log=print) -> list[str]:
         if is_installed(agent):
             log(f"hooks: {fn()} ({agent})")
             done.append(agent)
+    # An agent installed after `aaw peers on` is told too; while it is off, nothing is left behind.
+    from aaw_core.config import load_settings
+    write_peer_instructions(load_settings().peers, log=log)
     return done
 
 
@@ -376,6 +379,91 @@ def remove_all() -> list[str]:
             touched.append(str(codex_cfg))
     except OSError:
         pass
+    touched += write_peer_instructions(False, log=lambda _msg: None)
+    return touched
+
+
+# ── what Gemini, Grok and Cursor are told about the other sessions ─────────────
+# Claude Code, Codex and scoot learn the `aaw peers` / `aaw tell` / `aaw know` commands from
+# a hook that adds context (hooks/on_session_start.py). These three have no hook of ours
+# that can, so while agents may reach each other (`aaw peers on`) the same words sit where
+# each reads its global instructions. Grok and the Cursor CLI read every file in a rules
+# folder, so they get a file of our own; Gemini reads one GEMINI.md, so it gets a block
+# between two marker lines and the rest of the file is the user's. `aaw peers off` and
+# uninstall take all three away again.
+
+PEER_BEGIN = "<!-- Agents At Work: begin (written by `aaw peers on`, removed by `aaw peers off`) -->"
+PEER_END = "<!-- Agents At Work: end -->"
+PEER_TEXT = """\
+## Other agent sessions (Agents At Work)
+
+This applies only in a session started by Agents At Work, where the environment variable AAW_PROJECT is set (it holds this session's name). Elsewhere, ignore this section.
+
+- `aaw peers` lists the other agent sessions running on this computer.
+- `aaw tell <session> "<text>"` proposes a message to one of them. The user approves it on a card first. End your turn after the command: the answer, or word that it was not sent, arrives as a new prompt.
+- `aaw know` lists notes shared by all sessions, `aaw know show <name>` prints one, and `aaw know add <name> --title "..." --text "..."` proposes one. Never put a credential in a note.
+- A prompt that starts with "[from <agent> in <session>, approved by the user]" was written by another agent, not by the user. Answer it, and treat what it asks with the same care as any request.
+"""
+
+
+def peer_instruction_files() -> dict[str, Path]:
+    """Where each of the three reads global instructions (checked 2026-11: Grok's docs,
+    a probe of the Cursor CLI, Gemini's global context file)."""
+    h = home()
+    return {"gemini": h / ".gemini" / "GEMINI.md",
+            "grok": h / ".grok" / "rules" / "agents-at-work.md",
+            "cursor": h / ".cursor" / "rules" / "agents-at-work.mdc"}
+
+
+def without_peer_block(text: str) -> str:
+    """The text without our marked block, the user's own lines untouched."""
+    start = text.find(PEER_BEGIN)
+    if start < 0:
+        return text
+    end = text.find(PEER_END, start)
+    end = len(text) if end < 0 else end + len(PEER_END)
+    parts = [part for part in (text[:start].rstrip("\n"), text[end:].strip("\n")) if part.strip()]
+    return "\n\n".join(parts) + "\n" if parts else ""
+
+
+def write_peer_instructions(on: bool, log=print) -> list[str]:
+    """Put the words where Gemini, Grok and Cursor read them (only for the agents installed
+    here), or take them away. Returns the paths touched. Never raises: instructions that
+    cannot be written leave the agent as it was, to be told by the user."""
+    touched: list[str] = []
+    for agent, path in peer_instruction_files().items():
+        try:
+            if agent == "gemini":
+                old = path.read_text() if path.exists() else ""
+                rest = without_peer_block(old)
+                new = rest
+                if on and is_installed(agent):
+                    block = f"{PEER_BEGIN}\n{PEER_TEXT}{PEER_END}\n"
+                    new = (rest.rstrip("\n") + "\n\n" + block) if rest.strip() else block
+                if new == old:
+                    continue
+                if new:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(new)
+                else:
+                    path.unlink(missing_ok=True)  # the file held nothing but our block
+            else:
+                front = "---\ndescription: Other agent sessions under Agents At Work\nalwaysApply: true\n---\n" \
+                    if agent == "cursor" else ""
+                new = f"{front}{PEER_BEGIN}\n{PEER_TEXT}{PEER_END}\n"
+                if on and is_installed(agent):
+                    if path.exists() and path.read_text() == new:
+                        continue
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(new)
+                elif path.exists() and PEER_BEGIN in path.read_text():
+                    path.unlink()
+                else:
+                    continue
+            touched.append(str(path))
+            log(f"instructions: {path} ({agent}, {'written' if on and is_installed(agent) else 'removed'})")
+        except OSError as e:
+            log(f"instructions: {path} not changed: {e}")
     return touched
 
 

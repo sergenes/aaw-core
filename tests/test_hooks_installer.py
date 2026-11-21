@@ -176,3 +176,47 @@ def test_gemini_hook_timeouts_are_in_milliseconds(home):
     hi.update_codex_hooks()  # the others stay in seconds
     codex = json.loads((home / ".codex" / "hooks.json").read_text())["hooks"]
     assert codex["Stop"][0]["hooks"][0]["timeout"] == 30
+
+
+def test_gemini_grok_and_cursor_are_told_in_their_instructions(home, monkeypatch):
+    """They have no hook of ours that can add context, so `aaw peers on` writes the words
+    where each reads global instructions, and `aaw peers off` takes them away."""
+    monkeypatch.setattr(hi, "is_installed", lambda agent: agent in ("gemini", "grok"))
+    gemini, grok, cursor = (hi.peer_instruction_files()[a] for a in ("gemini", "grok", "cursor"))
+    gemini.parent.mkdir(parents=True)
+    gemini.write_text("# My rules\n\nAnswer in English.\n")
+    touched = hi.write_peer_instructions(True, log=lambda m: None)
+    assert touched == [str(gemini), str(grok)] and not cursor.exists()  # Cursor is not installed here
+    text = gemini.read_text()
+    assert text.startswith("# My rules\n\nAnswer in English.\n\n" + hi.PEER_BEGIN)
+    assert "aaw tell <session>" in text and text.endswith(hi.PEER_END + "\n")
+    assert grok.read_text().startswith(hi.PEER_BEGIN) and "AAW_PROJECT" in grok.read_text()
+    assert hi.write_peer_instructions(True, log=lambda m: None) == []  # nothing to do twice
+    assert gemini.read_text() == text
+    assert hi.write_peer_instructions(False, log=lambda m: None) == [str(gemini), str(grok)]
+    assert gemini.read_text() == "# My rules\n\nAnswer in English.\n" and not grok.exists()
+
+
+def test_the_instruction_files_we_own_come_and_go_whole(home, monkeypatch):
+    monkeypatch.setattr(hi, "is_installed", lambda agent: True)
+    gemini, grok, cursor = (hi.peer_instruction_files()[a] for a in ("gemini", "grok", "cursor"))
+    hi.write_peer_instructions(True, log=lambda m: None)
+    assert cursor.read_text().startswith("---\ndescription:") and "alwaysApply: true" in cursor.read_text()
+    assert gemini.read_text().startswith(hi.PEER_BEGIN)  # there was no GEMINI.md: ours alone
+    cursor.with_name("mine.mdc").write_text("my own rule")
+    hi.remove_all()
+    assert not gemini.exists() and not grok.exists() and not cursor.exists()
+    assert cursor.with_name("mine.mdc").read_text() == "my own rule"
+    # A file at our path that is not ours is left alone.
+    grok.parent.mkdir(parents=True, exist_ok=True)
+    grok.write_text("someone else's rule")
+    hi.write_peer_instructions(False, log=lambda m: None)
+    assert grok.read_text() == "someone else's rule"
+
+
+def test_the_block_is_taken_out_of_the_middle_of_a_file():
+    block = f"{hi.PEER_BEGIN}\nx\n{hi.PEER_END}"
+    assert hi.without_peer_block(f"above\n\n{block}\n\nbelow\n") == "above\n\nbelow\n"
+    assert hi.without_peer_block(f"{block}\n") == "" and hi.without_peer_block("plain\n") == "plain\n"
+    assert hi.without_peer_block(f"above\n{hi.PEER_BEGIN}\ncut off") == "above\n"
+

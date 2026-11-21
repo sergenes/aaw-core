@@ -684,6 +684,8 @@ def cmd_peers(a, settings: Settings) -> None:
     from aaw_core.host import peers
     if a.switch in ("on", "off"):
         save_config(settings.state_dir, peers=a.switch == "on")
+        # Gemini, Grok and Cursor have no hook that can tell them: they read it as instructions.
+        hooks_installer.write_peer_instructions(a.switch == "on", log=lambda msg: print(f"  {msg}"))
         print("Agents may now propose notes and messages to other sessions; you approve each one on a card."
               if a.switch == "on" else "Agents can no longer propose notes or messages to other sessions.")
         return
