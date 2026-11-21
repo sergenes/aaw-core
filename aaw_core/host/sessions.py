@@ -324,8 +324,20 @@ def start_session(settings: Settings, project_dir: Path, project: str, agent: st
         from aaw_core.host import service
         raise SessionError(f"the host is off: {service.start_hint()}")
     session = tmux_session(project)
-    out = [start_keep_awake(settings)]
-    if tmux.has_session(session):
+    exists = tmux.has_session(session)
+    ollama_lines: list[str] = []
+    if agent == "scoot" and not exists:
+        # An Ollama model needs Ollama up before scoot starts (0.1.22): the model asked
+        # for, else the one this folder's saved session resumes with.
+        from aaw_core.host import ollama
+        from aaw_core.host.detect import scoot_saved_model
+        try:
+            ollama_lines = ollama.ready_for(model or scoot_saved_model(project_dir), scoot_status,
+                                            settings.state_dir / "ollama.log")
+        except ollama.NotReady as e:
+            raise SessionError(str(e)) from e
+    out = [start_keep_awake(settings), *ollama_lines]
+    if exists:
         out.append(f"  tmux session '{session}' already exists; leaving it running")
     else:
         extra = {"SCOOT_MODEL": model} if (agent == "scoot" and model) else None

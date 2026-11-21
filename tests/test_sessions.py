@@ -186,3 +186,97 @@ def test_scoot_update_command_follows_how_scoot_was_installed(tmp_path, monkeypa
     exe.unlink()
     exe.symlink_to(venv / "scoot")
     assert sessions.scoot_update_command() == "pipx upgrade scootcli"
+
+
+# ── Ollama for a scoot session (0.1.22) ──────────────────────────────────────
+
+
+def _ollama(monkeypatch, *, installed=True, answering=False, launches=True, comes_up=True):
+    from aaw_core.host import ollama
+    calls = []
+    monkeypatch.setattr(ollama, "installed", lambda: installed)
+    monkeypatch.setattr(ollama, "answering", lambda timeout=2.0: answering)
+    monkeypatch.setattr(ollama, "launch", lambda log: calls.append("launch") or launches)
+    monkeypatch.setattr(ollama, "wait_until_answering", lambda wait_s=0: comes_up)
+    return ollama, calls
+
+
+def _statuses(*answers):
+    left = list(answers)
+    return lambda: left.pop(0) if len(left) > 1 else left[0]
+
+
+DOWN = ([], {"ollama": "could not connect"})
+UP = (["ollama/qwen:7b"], {})
+
+
+def test_ollama_is_left_alone_unless_an_ollama_model_is_asked_for(monkeypatch, tmp_path):
+    ollama, calls = _ollama(monkeypatch)
+    never = lambda: 1 / 0
+    assert ollama.ready_for(None, never, tmp_path / "o.log") == []
+    assert ollama.ready_for("openai/gpt-5", never, tmp_path / "o.log") == []
+    assert ollama.ready_for("ollama/qwen:7b", lambda: UP, tmp_path / "o.log") == []
+    assert ollama.ready_for("ollama/qwen:7b", lambda: None, tmp_path / "o.log") == []  # scoot unreadable
+    assert calls == []
+
+
+def test_ollama_is_started_when_installed_and_down(monkeypatch, tmp_path):
+    ollama, calls = _ollama(monkeypatch)
+    lines = ollama.ready_for("ollama/qwen:7b", _statuses(DOWN, UP), tmp_path / "o.log")
+    assert lines == ["  Ollama was not running; started it"] and calls == ["launch"]
+
+
+def test_ollama_says_why_it_cannot_serve(monkeypatch, tmp_path):
+    import pytest
+    log = tmp_path / "o.log"
+    ollama, calls = _ollama(monkeypatch, installed=False)
+    with pytest.raises(ollama.NotReady, match="not installed"):
+        ollama.ready_for("ollama/qwen:7b", lambda: DOWN, log)
+    assert calls == []
+    ollama, _ = _ollama(monkeypatch, comes_up=False)
+    with pytest.raises(ollama.NotReady, match="did not start"):
+        ollama.ready_for("ollama/qwen:7b", lambda: DOWN, log)
+    ollama, _ = _ollama(monkeypatch, launches=False)
+    with pytest.raises(ollama.NotReady, match="did not start"):
+        ollama.ready_for("ollama/qwen:7b", lambda: DOWN, log)
+    ollama, calls = _ollama(monkeypatch, answering=True)  # up, the model is not pulled
+    with pytest.raises(ollama.NotReady, match="ollama pull codestral:22b"):
+        ollama.ready_for("ollama/codestral:22b", lambda: UP, log)
+    assert calls == []
+    ollama, _ = _ollama(monkeypatch)  # started, the model is still not there
+    with pytest.raises(ollama.NotReady, match="ollama pull codestral:22b"):
+        ollama.ready_for("ollama/codestral:22b", _statuses(DOWN, UP), log)
+    ollama, _ = _ollama(monkeypatch, answering=True)  # scoot looks at another address
+    with pytest.raises(ollama.NotReady, match="scoot cannot reach it"):
+        ollama.ready_for("ollama/qwen:7b", lambda: DOWN, log)
+
+
+def test_scoot_saved_model_is_the_newest_session_of_the_folder(monkeypatch, tmp_path):
+    import json
+    import os
+
+    from aaw_core.host.detect import scoot_saved_model
+    monkeypatch.setenv("SCOOT_STATE_DIR", str(tmp_path))
+    proj = tmp_path / "proj"
+    assert scoot_saved_model(proj) == ""
+    d = tmp_path / "sessions"
+    d.mkdir()
+    for i, (root, model) in enumerate([(proj, "ollama/old"), (proj, "ollama/new"), (tmp_path / "other", "openai/x")]):
+        f = d / f"{i}.json"
+        f.write_text(json.dumps({"root": str(root), "active_model": model}))
+        os.utime(f, (1000 + i, 1000 + i))
+    (d / "bad.json").write_text("{")
+    assert scoot_saved_model(proj) == "ollama/new"
+
+
+def test_start_ollama_on_request(monkeypatch, tmp_path):
+    log = tmp_path / "o.log"
+    ollama, calls = _ollama(monkeypatch, answering=True)
+    assert ollama.start(log) == "running" and calls == []
+    ollama, calls = _ollama(monkeypatch, installed=False)
+    assert ollama.start(log) == "not_installed" and calls == []
+    ollama, calls = _ollama(monkeypatch)
+    assert ollama.start(log) == "started" and calls == ["launch"]
+    ollama, _ = _ollama(monkeypatch, comes_up=False)
+    assert ollama.start(log) == "failed"
+

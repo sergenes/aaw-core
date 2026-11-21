@@ -448,3 +448,39 @@ def test_heartbeat_says_why_scoot_has_no_models_encrypted(sup, monkeypatch):
     sup.heartbeat()
     sent = sup.transport.computer_updates[-1]
     assert (sent["scoot_models"], sent["scoot_errors_enc"]) == (["ollama/qwen"], "")  # the reason is withdrawn
+
+
+def test_heartbeat_offers_a_newer_scoot_encrypted(sup, monkeypatch):
+    """0.1.22: the phone's agent picker says a newer scoot exists and how to update it."""
+    import json
+    offer = {"installed": "0.14.0", "latest": "0.16.0", "command": "/Users/me/venv/bin/python -m pip install --upgrade scootcli"}
+    monkeypatch.setattr(sessions, "scoot_status", lambda: (["ollama/qwen"], {}))
+    monkeypatch.setattr(sessions, "scoot_update", lambda settings: offer)
+    sup.heartbeat()
+    sent = sup.transport.computer_updates[-1]
+    assert "/Users/me" not in sent["scoot_update_enc"]
+    assert json.loads(decrypt(sent["scoot_update_enc"], KEY)) == offer
+    monkeypatch.setattr(sessions, "scoot_update", lambda settings: None)
+    sup.heartbeat()
+    assert sup.transport.computer_updates[-1]["scoot_update_enc"] == ""  # withdrawn once scoot is current
+    monkeypatch.setattr(sessions, "scoot_status", lambda: None)  # scoot is gone: nothing is asked
+    monkeypatch.setattr(sessions, "scoot_update", lambda settings: 1 / 0)
+    sup.heartbeat()
+    assert sup.transport.computer_updates[-1]["scoot_update_enc"] == ""
+
+
+def test_the_phone_can_start_ollama_and_gets_fresh_models(sup, monkeypatch):
+    """0.1.22: "Start Ollama" on the phone; a guest of a shared session cannot ask."""
+    from aaw_core.host import ollama
+    monkeypatch.setattr(sessions, "scoot_status", lambda: (["ollama/qwen"], {}))
+    monkeypatch.setattr(sessions, "scoot_update", lambda settings: None)
+    monkeypatch.setattr(ollama, "start", lambda log: "started")
+    before = len(sup.transport.computer_updates)
+    assert sup.handle_request("start_ollama", {}) == {"result": "started"}
+    assert sup.transport.computer_updates[-1]["scoot_models"] == ["ollama/qwen"]
+    assert len(sup.transport.computer_updates) == before + 1
+    monkeypatch.setattr(ollama, "start", lambda log: "not_installed")
+    assert sup.handle_request("start_ollama", {}) == {"result": "not_installed"}
+    assert len(sup.transport.computer_updates) == before + 1  # nothing new to tell
+    assert sup.handle_guest_request("start_ollama", {}, "proj") == {"error": "unknown_request"}
+

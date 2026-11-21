@@ -139,6 +139,9 @@ Claude Code, Codex CLI, Gemini CLI, Grok CLI, Cursor, and [Scoot](https://github
 scoot ships often, so `aaw status` says when PyPI has a newer one and prints the command that updates it.
 It asks PyPI at most once a day and sends nothing but the package name; set `AAW_NO_UPDATE_CHECK=1` to switch the check off.
 
+A scoot session on an `ollama/...` model needs Ollama running, so `aaw start` starts Ollama when it is installed and stopped, and says so when it is not installed or the model is not pulled.
+`aaw start-ollama` does the same on its own.
+
 ## Contributing
 
 See [CONTRIBUTING.md](https://github.com/sergenes/aaw-core/blob/main/CONTRIBUTING.md). Contributions use the DCO (`git commit -s`). Security reports: see [SECURITY.md](https://github.com/sergenes/aaw-core/blob/main/SECURITY.md).
