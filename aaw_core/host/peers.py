@@ -17,7 +17,9 @@ between sessions. It is not a security wall: an agent with a shell could type in
 another session's terminal. The agent's own permission system is that wall."""
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import subprocess
 import sys
 import time
@@ -65,17 +67,37 @@ def notice(text: str) -> str:
 
 def others(settings: Settings, me: str = "") -> list[dict]:
     """Every running session, most recently used first: id, agent, folder, status and
-    whether it is the caller's own."""
+    whether it is the caller's own.
+
+    An agent that runs its commands in a sandbox (Codex) cannot reach tmux from there, so
+    tmux lists nothing. The host's own record of the sessions is readable from a sandbox,
+    and stands in: every session it does not call stopped. Delivery checks again, from
+    outside the sandbox."""
     docs = state.read_projects(state.mirror_dir(settings.state_dir))
+    live = sessions.list_sessions()
     rows = []
-    for s in sessions.list_sessions():
-        doc = docs.get(s.project) or {}
-        rows.append({
-            "id": s.project, "agent": sessions.session_agent(s.project) or doc.get("agent") or "",
-            "path": s.path, "status": doc.get("status") or "running",
-            "last_event_ts": int(doc.get("last_event_ts") or 0), "me": s.project == me,
-        })
+    if live:
+        for s in live:
+            doc = docs.get(s.project) or {}
+            rows.append({
+                "id": s.project, "agent": sessions.session_agent(s.project) or doc.get("agent") or "",
+                "path": s.path, "status": doc.get("status") or "running",
+                "last_event_ts": int(doc.get("last_event_ts") or 0), "me": s.project == me,
+            })
+    else:
+        for project, doc in docs.items():
+            if (doc.get("status") or "stopped") == "stopped":
+                continue
+            rows.append({
+                "id": project, "agent": doc.get("agent") or "", "path": doc.get("project_path") or "",
+                "status": doc.get("status"), "last_event_ts": int(doc.get("last_event_ts") or 0),
+                "me": project == me,
+            })
     return sorted(rows, key=lambda r: (-r["last_event_ts"], r["id"]))
+
+
+def is_running(settings: Settings, project: str, me: str = "") -> bool:
+    return any(r["id"] == project for r in others(settings, me))
 
 
 # ── requests and the worker that carries them out ────────────────────────────
@@ -85,10 +107,31 @@ def _dir(settings: Settings, kind: str) -> Path:
     return settings.state_dir / "peer" / kind
 
 
+def outbox(settings: Settings) -> Path:
+    """Where a command that cannot write the state dir leaves its request: a sandboxed
+    agent (Codex) may write under /tmp and nowhere in the home folder. The session's
+    daemon, outside the sandbox, picks the request up. One folder per user and state dir."""
+    tag = hashlib.sha256(str(settings.state_dir).encode()).hexdigest()[:8]
+    return Path(os.environ.get("AAW_OUTBOX_DIR") or f"/tmp/aaw-outbox-{os.getuid()}-{tag}")
+
+
+def _own_dir(path: Path) -> bool:
+    """A real folder of this user's that nobody else can write: /tmp is shared, and a
+    folder or link someone else put there is not a place to read requests from."""
+    try:
+        st = path.lstat()
+    except OSError:
+        return False
+    import stat
+    return stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid() and not st.st_mode & 0o022
+
+
 def pending_request(settings: Settings, project: str) -> bool:
     """Whether this session already has a proposal waiting for the user."""
     limit = time.time() - (TURN_WAIT_S + ASK_TIMEOUT_S * (GUEST_RETRIES + 1) + 60)
-    for f in _dir(settings, "requests").glob("*.json"):
+    box = outbox(settings)
+    waiting = [*_dir(settings, "requests").glob("*.json"), *(box.glob("*.json") if _own_dir(box) else [])]
+    for f in waiting:
         try:
             if f.stat().st_mtime < limit:
                 f.unlink(missing_ok=True)  # a worker that died: do not block the session for good
@@ -101,18 +144,69 @@ def pending_request(settings: Settings, project: str) -> bool:
 
 
 def submit(settings: Settings, request: dict) -> Path:
-    """Leave a request and start the worker that asks the user about it. The worker is
-    its own process group: it must outlive the tool call that proposed the request."""
-    folder = _dir(settings, "requests")
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"{uuid.uuid4().hex}.json"
-    path.write_text(json.dumps({**request, "ts": time.time()}))
+    """Leave a request and start the worker that asks the user about it. From inside a
+    sandbox the state dir cannot be written and a worker started here could not reach the
+    relay: the request then goes to the outbox, and the session's daemon starts the worker."""
+    body = json.dumps({**request, "ts": time.time()})
+    name = f"{uuid.uuid4().hex}.json"
+    try:
+        folder = _dir(settings, "requests")
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / name
+        path.write_text(body)
+    except OSError:
+        box = outbox(settings)
+        box.mkdir(mode=0o700, exist_ok=True)
+        if not _own_dir(box):
+            raise
+        path = box / name
+        path.write_text(body)
+        return path
+    start_worker(settings, path)
+    return path
+
+
+REQUEST_KINDS = ("tell", "know_add", "know_remove")
+
+
+def collect_outbox(settings: Settings, project: str) -> int:
+    """The daemon's part: take this session's requests out of the outbox and start a
+    worker for each. A request names its sender, and a daemon takes only its own
+    session's, so a session speaks for itself alone. Returns how many were taken."""
+    box = outbox(settings)
+    if not _own_dir(box):
+        return 0
+    taken = 0
+    for f in sorted(box.glob("*.json")):
+        try:
+            if f.is_symlink() or f.stat().st_size > 64 * 1024:
+                f.unlink(missing_ok=True)
+                continue
+            request = json.loads(f.read_text())
+            if not isinstance(request, dict) or request.get("from") != project:
+                continue
+            f.unlink(missing_ok=True)
+            if request.get("kind") not in REQUEST_KINDS or len(str(request.get("text") or "")) > MAX_MESSAGE:
+                continue
+            folder = _dir(settings, "requests")
+            folder.mkdir(parents=True, exist_ok=True)
+            path = folder / f.name
+            path.write_text(json.dumps(request))
+            start_worker(settings, path)
+            taken += 1
+        except (OSError, ValueError):
+            continue
+    return taken
+
+
+def start_worker(settings: Settings, path: Path) -> None:
+    """The worker is its own process group: it must outlive the tool call, or the daemon
+    tick, that started it."""
     log = settings.logs_dir / "peers.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     with open(log, "ab") as out:
         subprocess.Popen([sys.executable, "-m", "aaw_core.host.peers", str(path)],
                          stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True)
-    return path
 
 
 def _log(settings: Settings, msg: str) -> None:
@@ -272,7 +366,10 @@ def owed_answer(settings: Settings, project: str, log_entries: list[dict], now: 
     if now * 1000 - owed.get("ts_ms", 0) > ANSWER_WAIT_S * 1000:
         path.unlink(missing_ok=True)
         return {**owed, "expired": True}
-    prompts = [e for e in log_entries if e.get("type") == "message" and e.get("role") == "user"]
+    # An answer to a card is logged as the user's words too ("Yes" to a tool approval in
+    # the middle of the turn): it carries the question's id, and it is not a prompt.
+    prompts = [e for e in log_entries if e.get("type") == "message" and e.get("role") == "user"
+               and not e.get("question_id")]
     if not prompts:
         return None
     last = prompts[-1]

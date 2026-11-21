@@ -217,7 +217,9 @@ def test_the_answer_is_owed_only_by_the_turn_that_read_the_message(settings):
     assert peers.owed_answer(settings, "scootcli", earlier, now) is None and path.exists()  # a turn already running
     other = [*earlier, _prompt("something else", 1500)]
     assert peers.owed_answer(settings, "scootcli", other, now) is None and path.exists()
-    read = [*earlier, _prompt("[from Claude in bridge, approved by the user] What changed?", 1500)]
+    read = [*earlier, _prompt("[from Claude in bridge, approved by the user] What changed?", 1500),
+            # Seen with scoot: a tool approval answered during the turn is logged as the user's "Yes".
+            {**_prompt("Yes", 1600), "question_id": "q9"}]
     assert peers.owed_answer(settings, "scootcli", read, now)["to"] == "bridge"
     assert not path.exists()  # one answer per approved message
     assert peers.owed_answer(settings, "scootcli", read, now) is None
@@ -363,9 +365,8 @@ def test_tell_proposes_one_message_and_says_what_happens_next(home, monkeypatch,
     from aaw_core.host import cli
     submitted = []
     monkeypatch.setenv("AAW_PEERS", "1")
-    monkeypatch.setattr(sessions, "list_sessions", list)
-    monkeypatch.setattr(sessions, "session_alive", lambda project: project == "scootcli")
-    monkeypatch.setattr(sessions, "session_agent", lambda project: "scoot")
+    monkeypatch.setattr(peers, "others", lambda settings, me="": [
+        {"id": "bridge", "agent": "claude", "me": True}, {"id": "scootcli", "agent": "scoot", "me": False}])
     monkeypatch.setattr(peers, "submit", lambda settings, request: submitted.append(request))
     assert "inside a session" in _fails(["tell", "scootcli", "hi"], capsys)  # a plain terminal
     _in_session(monkeypatch)
@@ -434,4 +435,83 @@ def test_status_says_whether_agents_may_reach_each_other(home, monkeypatch, caps
     assert cli.main(["status", "--json"]) == 0
     snap = json.loads(capsys.readouterr().out)
     assert snap["peers"] is False and snap["knowledge_dir"] == str(home / "knowledge")
+
+
+# ── an agent that runs its commands in a sandbox (Codex) ─────────────────────
+
+
+@pytest.fixture
+def box(settings, tmp_path, monkeypatch):
+    monkeypatch.setenv("AAW_OUTBOX_DIR", str(tmp_path / "outbox"))
+    started = []
+    monkeypatch.setattr(peers, "start_worker", lambda settings, path: started.append(path))
+    return started
+
+
+def test_a_request_goes_to_the_outbox_when_the_state_dir_cannot_be_written(settings, box, monkeypatch):
+    """Seen with Codex: its sandbox allows /tmp and not the home folder, and a worker
+    started inside it could not reach the relay."""
+    real_mkdir = type(settings.state_dir).mkdir
+
+    def mkdir(self, *a, **k):
+        if "peer" in self.parts:
+            raise PermissionError("Operation not permitted")
+        return real_mkdir(self, *a, **k)
+
+    monkeypatch.setattr(type(settings.state_dir), "mkdir", mkdir)
+    path = peers.submit(settings, TELL)
+    assert path.parent == peers.outbox(settings) and box == []  # left for the daemon, no worker here
+    assert peers.pending_request(settings, "bridge") and not peers.pending_request(settings, "scootcli")
+    monkeypatch.undo()
+    monkeypatch.setenv("AAW_OUTBOX_DIR", str(path.parent))
+    started = []
+    monkeypatch.setattr(peers, "start_worker", lambda settings, path: started.append(path))
+    assert peers.collect_outbox(settings, "scootcli") == 0 and path.exists()  # another session's daemon leaves it
+    assert peers.collect_outbox(settings, "bridge") == 1 and not path.exists()
+    taken = json.loads(started[0].read_text())
+    assert started[0].parent == settings.state_dir / "peer" / "requests" and taken["text"] == TELL["text"]
+
+
+def test_the_outbox_takes_nothing_it_should_not(settings, box, tmp_path):
+    out = peers.outbox(settings)
+    assert peers.collect_outbox(settings, "bridge") == 0  # no folder yet
+    out.mkdir(mode=0o700)
+    (out / "a.json").write_text(json.dumps({**TELL, "kind": "run_anything"}))
+    (out / "b.json").write_text(json.dumps({**TELL, "text": "x" * 5000}))
+    (out / "c.json").write_text("not json")
+    (out / "d.json").write_text(json.dumps(["tell"]))
+    (out / "e.json").symlink_to(tmp_path / "config.json")
+    assert peers.collect_outbox(settings, "bridge") == 0 and box == []
+    out.chmod(0o777)  # a folder others can write is not read at all
+    (out / "f.json").write_text(json.dumps(TELL))
+    assert peers.collect_outbox(settings, "bridge") == 0 and box == []
+
+
+def test_the_sessions_are_listed_from_the_hosts_record_when_tmux_cannot_be_reached(settings, monkeypatch):
+    from aaw_core.host import state
+    monkeypatch.setattr(sessions, "list_sessions", list)  # as inside a sandbox
+    mirror = state.mirror_dir(settings.state_dir)
+    mirror.mkdir(parents=True)
+    for project, doc in {"bridge": {"status": "running", "agent": "codex", "last_event_ts": 5},
+                         "scootcli": {"status": "idle", "agent": "scoot", "project_path": "/p/scootcli",
+                                      "last_event_ts": 9},
+                         "old": {"status": "stopped", "agent": "claude"}}.items():
+        (mirror / f"{project}.json").write_text(json.dumps(doc))
+    rows = peers.others(settings, "bridge")
+    assert [(r["id"], r["agent"], r["me"]) for r in rows] == [("scootcli", "scoot", False), ("bridge", "codex", True)]
+    assert rows[0]["path"] == "/p/scootcli"
+    assert peers.is_running(settings, "scootcli") and not peers.is_running(settings, "old")
+
+
+def test_codex_and_scoot_are_told_once_per_session_at_a_prompt(settings):
+    assert on_session_start.told_block(settings, "bridge", "claude", "s1") == ""  # told at session start
+    assert on_session_start.told_block(settings, "bridge", "gemini", "s1") == ""  # no hook that can
+    first = on_session_start.told_block(settings, "bridge", "codex", "s1", now=1000)
+    assert "aaw tell <session>" in first
+    assert on_session_start.told_block(settings, "bridge", "codex", "s1", now=2000) == ""
+    assert on_session_start.told_block(settings, "bridge", "codex", "s2", now=3000) == first  # a new session
+    late = 3000 + on_session_start.RETELL_AFTER_S + 1
+    assert on_session_start.told_block(settings, "bridge", "codex", "s2", now=late) == first
+    off = Settings(state_dir=settings.state_dir, relay_url=None, computer_name="box", keep_awake=False)
+    assert on_session_start.told_block(off, "other", "codex", "s1") == ""
 

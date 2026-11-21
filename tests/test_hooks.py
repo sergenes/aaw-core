@@ -109,7 +109,7 @@ def test_open_transport_needs_relay_and_identity(settings):
 
 @pytest.mark.parametrize("agent,expected", [
     ("claude", {"decision": "approve"}),
-    ("codex", {"hookSpecificOutput": {"permissionDecision": "approve"}}),
+    ("codex", {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"}}),
     ("gemini", {"decision": "allow"}),
     ("cursor", {"permission": "allow"}),
     ("scoot", {"permissionDecision": "allow"}),
@@ -125,7 +125,10 @@ def test_block_output_per_agent():
     assert json.loads(out) == {"decision": "block", "reason": "nope"} and code == 2  # Grok needs exit 2
     assert json.loads(on_pre_tool.block_output("gemini")[0])["decision"] == "deny"
     assert json.loads(on_pre_tool.block_output("cursor")[0]) == {"permission": "deny", "user_message": "Denied from mobile app."}
-    assert json.loads(on_pre_tool.block_output("codex")[0])["hookSpecificOutput"]["permissionDecision"] == "deny"
+    # Codex 0.162 reads the reply against a schema: without the event's name it is invalid,
+    # the hook counts as failed, and the denied command runs (reproduced 2026-11-21).
+    assert json.loads(on_pre_tool.block_output("codex", "Denied.")[0]) == {"hookSpecificOutput": {
+        "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "Denied."}}
     assert json.loads(on_pre_tool.block_output("scoot")[0])["permissionDecision"] == "deny"
 
 

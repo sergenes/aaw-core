@@ -46,9 +46,36 @@ def scoot_model() -> str:
     return model
 
 
-# Agents whose session-start hook may print plain text that becomes context. The others
-# expect their own output format, and a line they cannot parse is reported as a broken hook.
+# Agents whose session-start hook may print plain text that becomes context. Codex has no
+# session-start hook of ours (a new entry would need the user's trust in /hooks) and scoot
+# adds context at a prompt, so those two are told by the prompt hook, once per session
+# (`told_block`). Gemini, Grok and Cursor have no hook of ours that can add context.
 CONTEXT_AGENTS = ("claude",)
+PROMPT_CONTEXT_AGENTS = ("codex", "scoot")
+RETELL_AFTER_S = 6 * 3600  # a long session may have compacted the block away
+
+
+def told_block(settings, project: str, agent: str, session_key: str, now: float | None = None) -> str:
+    """The block for an agent that is told at a prompt, when this session has not been
+    told yet (or long ago), else "". Remembers that it was told."""
+    import json
+    import time
+    if not settings.peers or agent not in PROMPT_CONTEXT_AGENTS:
+        return ""
+    now = time.time() if now is None else now
+    marker = settings.state_dir / "peer" / "told" / f"{project}.json"
+    try:
+        seen = json.loads(marker.read_text())
+    except (OSError, ValueError):
+        seen = {}
+    if seen.get("key") == session_key and now - float(seen.get("ts") or 0) < RETELL_AFTER_S:
+        return ""
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(json.dumps({"key": session_key, "ts": now}))
+    except OSError:
+        return ""  # cannot remember: better silent than repeated at every prompt
+    return peers_block(settings, project)
 
 
 def peers_block(settings, project: str) -> str:

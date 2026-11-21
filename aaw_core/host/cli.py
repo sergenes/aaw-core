@@ -717,15 +717,17 @@ def cmd_tell(a, settings: Settings) -> None:
         die(f"the message is longer than {peers.MAX_MESSAGE} characters. Write it to a file and send its path.")
     if a.id == me:
         die("that is this session")
-    if not sessions.session_alive(a.id):
-        names = ", ".join(r["id"] for r in peers.others(settings, me) if not r["me"]) or "none"
+    running = peers.others(settings, me)
+    if not any(r["id"] == a.id for r in running):
+        names = ", ".join(r["id"] for r in running if not r["me"]) or "none"
         die(f"{a.id} is not running. Running sessions: {names}")
     if not settings.relay_url or load_identity(settings) is None:
         die("this computer is not linked to a phone, so nobody can approve the message")
     if peers.pending_request(settings, me):
         die("one proposal from this session is already waiting for the user. Wait for its outcome.")
+    to_agent = next((r["agent"] for r in running if r["id"] == a.id), "")
     peers.submit(settings, {"kind": "tell", "from": me, "agent": agent, "to": a.id,
-                            "to_agent": sessions.session_agent(a.id) or "", "text": text})
+                            "to_agent": to_agent, "text": text})
     print(f"Asked the user to approve your message to {a.id}. It is sent only if they approve.\n"
           "End your turn now: the answer, or word that it was not sent, arrives as a new prompt.")
 

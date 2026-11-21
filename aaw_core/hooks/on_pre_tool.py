@@ -56,7 +56,10 @@ ALWAYS_ASK = {
 def approve_output(agent: str) -> tuple[str, int]:
     """(stdout, exit code) that approves the tool call for this agent."""
     if agent == "codex":
-        return json.dumps({"hookSpecificOutput": {"permissionDecision": "approve"}}), 0
+        # Codex checks the reply against its schema (seen in 0.162): the event's name is
+        # required and the decision is allow, deny or ask. A reply it cannot read is a
+        # failed hook, and a failed hook lets the tool call run.
+        return json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"}}), 0
     if agent == "gemini":
         return json.dumps({"decision": "allow"}), 0
     if agent == "cursor":
@@ -69,7 +72,9 @@ def approve_output(agent: str) -> tuple[str, int]:
 def block_output(agent: str, reason: str = "Denied from mobile app.") -> tuple[str, int]:
     """(stdout, exit code) that blocks the tool call for this agent."""
     if agent == "codex":
-        return json.dumps({"hookSpecificOutput": {"permissionDecision": "deny",
+        # Without the event's name Codex 0.162 called this reply invalid and ran the denied
+        # command anyway (reproduced 2026-11-21: "No" on the phone, the file was written).
+        return json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                   "permissionDecisionReason": reason}}), 0
     if agent == "grok":
         return json.dumps({"decision": "block", "reason": reason}), 2  # Grok needs exit 2 to deny

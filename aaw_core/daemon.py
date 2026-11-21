@@ -84,6 +84,28 @@ def project_doc(transport: RelayTransport) -> dict:
 # ── commands from the phone ─────────────────────────────────────────────────
 
 
+def collect_peer_requests(settings: Settings, project_id: str) -> None:
+    """A sandboxed agent's `aaw tell` or `aaw know add` cannot start its own worker: it
+    leaves the request in the outbox, and this session's daemon carries it on."""
+    try:
+        from aaw_core.host import peers
+        taken = peers.collect_outbox(settings, project_id)
+        if taken:
+            log(f"peers: took {taken} request(s) from the outbox")
+    except Exception as e:  # noqa: BLE001 - never the daemon's problem
+        log(f"peers: outbox check failed: {e}", err=True)
+
+
+def return_owed_answer(settings: Settings, project_id: str, agent: str, response: str) -> None:
+    """A turn's answer captured here, not by the Stop hook (Gemini's and Cursor's hooks can
+    stay silent): if that turn answered another agent's message, the answer goes back to it."""
+    from aaw_core.hooks.common import open_transport
+    from aaw_core.host import peers
+    done = peers.return_answer(settings, project_id, agent, response, open_transport)
+    if done:
+        log(f"peers: {done}")
+
+
 def stale_notice(cmd: dict, now_s: float | None = None) -> str | None:
     """The feed message for a command that waited too long to deliver, or None while it
     is fresh. Age counts from deliver_at for a scheduled prompt (its send time is the
@@ -804,6 +826,7 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
                                                                           "agent": "gemini"})
                                         gemini_last_hash = h
                                         log(f"gemini response captured ({len(response)} chars)")
+                                        return_owed_answer(settings, project_id, "gemini", response)
                                     except Exception as e:  # noqa: BLE001
                                         log(f"gemini response write failed: {e}", err=True)
                                 gemini_idle_written = True  # an empty block is retried next tick
@@ -833,6 +856,7 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
                                         transport.write_event("message", {"role": "assistant", "content": response,
                                                                           "agent": "cursor"})
                                         log(f"Cursor response captured via the idle fallback ({len(response)} chars)")
+                                        return_owed_answer(settings, project_id, "cursor", response)
                                 except Exception as e:  # noqa: BLE001
                                     log(f"Cursor fallback capture failed: {e}", err=True)
                     elif pane.strip():
@@ -933,6 +957,7 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
         if now - last_cmd_poll >= COMMAND_POLL_S and now >= backoff_until:
             last_cmd_poll = now
             try:
+                collect_peer_requests(settings, project_id)
                 commands = transport.poll_commands()
                 for cmd in commands:  # execute, then mark done, per command (at-least-once)
                     try:
