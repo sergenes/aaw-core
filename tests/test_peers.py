@@ -420,8 +420,9 @@ def test_answer_gives_a_waiting_question_one_of_its_options(home, monkeypatch, c
     assert "must be one of" in _fails(["answer", "bridge", "yes"], capsys)
     assert cli.main(["answer", "bridge", "don't", "send"]) == 0
     assert waiting.answers_written == [("q7", "Don't send")]
-    # As the Mac app calls it: the question named, the answer after "--".
-    assert cli.main(["answer", "bridge", "--question", "q7", "--", "Send"]) == 0
+    # As the Mac app calls it: the question named first, then "--", so an answer that
+    # starts with a dash is still an answer.
+    assert cli.main(["answer", "--question", "q7", "--", "bridge", "Send"]) == 0
     assert waiting.answers_written[-1] == ("q7", "Send")
     waiting.pending = ""
     assert "not waiting for an answer" in _fails(["answer", "bridge", "Send"], capsys)
