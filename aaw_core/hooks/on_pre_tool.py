@@ -115,6 +115,11 @@ def normalize_payload(agent: str, payload: dict) -> dict:
     return payload
 
 
+# Each agent's name for its shell tool. Grok called it run_terminal_cmd and now (seen
+# 2026-11-21) run_terminal_command; its card said "Allow run_terminal_command?" with no command.
+SHELL_TOOLS = ("Bash", "run_shell_command", "Shell", "run_terminal_cmd", "run_terminal_command", "run_shell")
+
+
 def build_question(tool_name: str, tool_input: dict) -> str:
     """The human-readable question on the permission card."""
     file_path = tool_input.get("file_path") or tool_input.get("path") or ""  # scoot says "path"
@@ -123,7 +128,7 @@ def build_question(tool_name: str, tool_input: dict) -> str:
         return f"Create / overwrite: {file_path or 'a file'}"
     if tool_name in ("Edit", "MultiEdit", "replace_in_file", "edit_file"):
         return f"Edit: {file_path or 'a file'}"
-    if tool_name in ("Bash", "run_shell_command", "Shell", "run_terminal_cmd", "run_shell"):
+    if tool_name in SHELL_TOOLS and cmd:
         return f"Run: {cmd[:140]}"
     if tool_name == "open_editor":  # scoot: opens the file in the user's editor
         return f"Open in the editor: {file_path or 'a file'}"
@@ -141,7 +146,6 @@ def build_question(tool_name: str, tool_input: dict) -> str:
 # ── the decision ────────────────────────────────────────────────────────────
 
 
-SHELL_TOOLS = ("Bash", "run_shell_command", "Shell", "run_terminal_cmd", "run_shell")
 OWN_COMMANDS = ("tell", "peers", "know")  # each reads only, or asks the user on its own card
 
 

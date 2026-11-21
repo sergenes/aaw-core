@@ -515,3 +515,14 @@ def test_codex_and_scoot_are_told_once_per_session_at_a_prompt(settings):
     off = Settings(state_dir=settings.state_dir, relay_url=None, computer_name="box", keep_awake=False)
     assert on_session_start.told_block(off, "other", "codex", "s1") == ""
 
+
+def test_groks_shell_tool_is_a_shell_tool(settings, monkeypatch):
+    """Seen 2026-11-21: Grok names it run_terminal_command, the card read "Allow
+    run_terminal_command?" with no command, and `aaw tell` got a tool card of its own."""
+    assert on_pre_tool.build_question("run_terminal_command", {"command": "ls -la"}) == "Run: ls -la"
+    assert on_pre_tool.build_question("run_terminal_command", {}) == "Allow run_terminal_command?"
+    monkeypatch.setattr(on_pre_tool, "open_transport", lambda *a, **k: 1 / 0)  # never reached
+    out, code = on_pre_tool.decide(settings, "bridge", "grok", {
+        "tool_name": "run_terminal_command", "tool_input": {"command": 'aaw tell x-claude "pong?"'}})
+    assert (out, code) == on_pre_tool.approve_output("grok")
+
