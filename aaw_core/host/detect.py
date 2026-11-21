@@ -653,6 +653,21 @@ def has_scoot_history(project_dir: Path) -> bool:
     return False
 
 
+def scoot_saved_model(project_dir: Path) -> str:
+    """The model scoot's newest saved session for this folder ran on (what --continue
+    resumes with), or "" when there is none."""
+    state = Path(os.environ.get("SCOOT_STATE_DIR") or Path.home() / ".local/state/scoot")
+    best, model = -1.0, ""
+    for f in (state / "sessions").glob("*.json"):
+        try:
+            data = json.loads(f.read_text())
+            if data.get("root") == str(project_dir) and f.stat().st_mtime > best:
+                best, model = f.stat().st_mtime, str(data.get("active_model") or data.get("model") or "")
+        except (OSError, ValueError, AttributeError):
+            continue
+    return model
+
+
 def detect_codex_update_dialog(pane: str) -> bool:
     """Codex's startup "Update available" menu (brew installs: "1. Update now / 2. Skip /
     3. Skip until next version"). The installer turns the check off in the Codex config,

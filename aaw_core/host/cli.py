@@ -246,7 +246,8 @@ def cmd_start(a, settings: Settings) -> None:
             hint = next((m for m in models if m.startswith("ollama/")), models[0] if models else "ollama/<model>")
             die("--model is required the first time on a folder (provider/model). Try `aaw models`.\n"
                 f"e.g. aaw start {a.dir} --agent scoot --model {hint}")
-        if model and models and model not in models:
+        # An Ollama model is checked by start_session, which starts Ollama when it is down.
+        if model and models and model not in models and not model.startswith("ollama/"):
             die(f"model {model} is not available. Run `aaw models` to see the list.")
     if a.id:
         project = a.id
@@ -648,6 +649,25 @@ def cmd_models(a, settings: Settings) -> None:
             print(m)
 
 
+OLLAMA_START_SAYS = {
+    "running": "Ollama is already running.",
+    "started": "Ollama was not running; started it.",
+    "not_installed": "Ollama is not installed on this computer. Get it from https://ollama.com",
+    "failed": "Ollama is installed but did not start. Start it by hand.",
+}
+
+
+def cmd_start_ollama(a, settings: Settings) -> None:
+    from aaw_core.host import ollama
+    result = ollama.start(settings.state_dir / "ollama.log")
+    if a.json:
+        print(json.dumps({"result": result}))
+    elif result in ("running", "started"):
+        print(OLLAMA_START_SAYS[result])
+    else:
+        die(OLLAMA_START_SAYS[result])
+
+
 def cmd_install_hooks(a, settings: Settings) -> None:
     hooks_installer.install_all()
 
@@ -862,6 +882,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--provider", help="only this provider (openai, anthropic, ollama)")
     s.add_argument("--json", action="store_true", help="the list as JSON (null when scoot is not installed)")
     s.set_defaults(fn=cmd_models)
+    s = sp.add_parser("start-ollama", help="start Ollama when it is installed and not running (for scoot's local models)")
+    s.add_argument("--json", action="store_true", help='print {"result": running|started|not_installed|failed}')
+    s.set_defaults(fn=cmd_start_ollama)
     sp.add_parser("install-hooks", help="register the hooks with every installed agent").set_defaults(
         fn=cmd_install_hooks)
     s = sp.add_parser("shell-integration", help="make a plain `claude` (codex, ...) start a bridged session")

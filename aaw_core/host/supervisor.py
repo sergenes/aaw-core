@@ -312,7 +312,7 @@ class Supervisor:
         handler = {
             "start_session": self.req_start_session, "stop_session": self.req_stop_session,
             "new_session": self.req_new_session, "fs_browse": self.req_fs_browse, "fs_fetch": self.req_fs_fetch,
-            "fs_attach": self.req_fs_attach,
+            "fs_attach": self.req_fs_attach, "start_ollama": self.req_start_ollama,
         }.get(kind)
         if handler is None:
             return {"error": "unknown_request"}
@@ -382,6 +382,16 @@ class Supervisor:
                                                 "pending_question_id": ""})
         return {"result": "stopped", "session_id": pid}
 
+    def req_start_ollama(self, payload: dict) -> dict:
+        """The phone's "Start Ollama" next to a scoot whose Ollama models are missing
+        (0.1.22). The heartbeat that follows carries the models scoot can serve now."""
+        from aaw_core.host import ollama
+        result = ollama.start(self.settings.state_dir / "ollama.log")
+        self.log(f"remote start of Ollama: {result}")
+        if result in ("running", "started"):
+            self.heartbeat()
+        return {"result": result}
+
     def req_new_session(self, payload: dict) -> dict:
         """Launch a brand-new session at a browsed folder. The id comes from the same
         resolver `aaw start` uses; the path is fenced to the browse roots even though the
@@ -422,6 +432,9 @@ class Supervisor:
                 self.log(line)
         except sessions.SessionError as e:
             self.log(f"remote start failed for {pid}: {e}")
+            if pid in self.cache:  # a restart: the stopped card says why (Ollama missing, no such model)
+                self.transport.set_project_fields(pid, {"status": "stopped",
+                                                        "last_event_summary": self.encrypt(str(e))})
             return {"result": "error"}
         return {"result": "started", "session_id": pid}
 

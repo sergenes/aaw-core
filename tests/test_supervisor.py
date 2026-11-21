@@ -467,3 +467,20 @@ def test_heartbeat_offers_a_newer_scoot_encrypted(sup, monkeypatch):
     monkeypatch.setattr(sessions, "scoot_update", lambda settings: 1 / 0)
     sup.heartbeat()
     assert sup.transport.computer_updates[-1]["scoot_update_enc"] == ""
+
+
+def test_the_phone_can_start_ollama_and_gets_fresh_models(sup, monkeypatch):
+    """0.1.22: "Start Ollama" on the phone; a guest of a shared session cannot ask."""
+    from aaw_core.host import ollama
+    monkeypatch.setattr(sessions, "scoot_status", lambda: (["ollama/qwen"], {}))
+    monkeypatch.setattr(sessions, "scoot_update", lambda settings: None)
+    monkeypatch.setattr(ollama, "start", lambda log: "started")
+    before = len(sup.transport.computer_updates)
+    assert sup.handle_request("start_ollama", {}) == {"result": "started"}
+    assert sup.transport.computer_updates[-1]["scoot_models"] == ["ollama/qwen"]
+    assert len(sup.transport.computer_updates) == before + 1
+    monkeypatch.setattr(ollama, "start", lambda log: "not_installed")
+    assert sup.handle_request("start_ollama", {}) == {"result": "not_installed"}
+    assert len(sup.transport.computer_updates) == before + 1  # nothing new to tell
+    assert sup.handle_guest_request("start_ollama", {}, "proj") == {"error": "unknown_request"}
+
