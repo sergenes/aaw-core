@@ -353,6 +353,8 @@ def cmd_status(a, settings: Settings) -> None:
             # Why a provider has no models (0.1.18), so an app can say it next to a scoot
             # it cannot start: {} when all answered, null when scoot is not installed.
             snap["scoot_errors"] = scoot[1] if scoot is not None else None
+            # A newer scoot on PyPI (0.1.21): {installed, latest, command}, else null.
+            snap["scoot_update"] = sessions.scoot_update(settings)
         print(json.dumps(snap, sort_keys=True))
         return
     live = sessions.list_sessions()
@@ -375,6 +377,10 @@ def cmd_status(a, settings: Settings) -> None:
         print(f"Scoot: {len(scoot[0])} models available (aaw models)")
         for provider, why in sorted(scoot[1].items()):
             print(f"  {provider}: {why}")
+        update = sessions.scoot_update(settings)
+        if update:
+            print(f"  scoot {update['latest']} is available (installed: {update['installed']}). "
+                  f"Update with: {update['command']}")
 
 
 # ── the feed ─────────────────────────────────────────────────────────────────

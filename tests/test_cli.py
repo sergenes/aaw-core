@@ -290,3 +290,25 @@ def test_status_json_says_why_scoot_has_no_models(tmp_path, monkeypatch, capsys)
     assert cli.main(["status", "--json", "--agents"]) == 0
     snap = json.loads(capsys.readouterr().out)
     assert (snap["scoot_models"], snap["scoot_errors"]) == (None, None)
+
+
+def test_status_offers_a_newer_scoot(tmp_path, monkeypatch, capsys):
+    """Nothing told a user that scoot had a new release. `aaw status` says so, with the
+    command for the way this scoot was installed, and the JSON carries it for the apps."""
+    from aaw_core.host import hooks_installer, sessions
+    monkeypatch.setenv("AAW_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(sessions, "list_sessions", list)
+    monkeypatch.setattr(hooks_installer, "detected_agents", lambda: ["scoot"])
+    monkeypatch.setattr(sessions, "scoot_status", lambda: (["ollama/qwen"], {}))
+    offer = {"installed": "0.15.0", "latest": "0.16.0", "command": "pipx upgrade scootcli"}
+    monkeypatch.setattr(sessions, "scoot_update", lambda settings: offer)
+    assert cli.main(["status", "--json", "--agents"]) == 0
+    assert json.loads(capsys.readouterr().out)["scoot_update"] == offer
+    assert cli.main(["status"]) == 0
+    assert ("  scoot 0.16.0 is available (installed: 0.15.0). Update with: pipx upgrade scootcli"
+            in capsys.readouterr().out)
+    monkeypatch.setattr(sessions, "scoot_update", lambda settings: None)
+    assert cli.main(["status", "--json", "--agents"]) == 0
+    assert json.loads(capsys.readouterr().out)["scoot_update"] is None
+    assert cli.main(["status"]) == 0
+    assert "is available" not in capsys.readouterr().out
