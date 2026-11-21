@@ -401,3 +401,106 @@ def scoot_models() -> list[str] | None:
     """Model ids the installed scoot can serve (provider/model), or None when scoot is absent."""
     status = scoot_status()
     return status[0] if status is not None else None
+
+
+SCOOT_PYPI_URL = "https://pypi.org/pypi/scootcli/json"
+SCOOT_INSTALLER = "curl -fsSL https://raw.githubusercontent.com/sergenes/scootcli/main/install.sh | bash"
+SCOOT_CHECK_EVERY_S = 24 * 3600
+SCOOT_CHECK_RETRY_S = 3600  # after a failed look (offline), not a day later
+SCOOT_CHECK_TIMEOUT_S = 4.0
+
+
+def version_tuple(text: str) -> tuple[int, ...] | None:
+    """"scoot 0.15.0" or "0.15.0" as (0, 15, 0); None for anything that is not a plain
+    release number (a dev or pre-release build is never offered an update)."""
+    word = text.strip().split()[-1] if text.strip() else ""
+    parts = word.split(".")
+    if len(parts) < 2 or not all(p.isdigit() for p in parts):
+        return None
+    return tuple(int(p) for p in parts)
+
+
+def scoot_installed_version() -> str:
+    """The version `scoot --version` prints ("0.15.0"), or "" when it cannot be read."""
+    try:
+        r = subprocess.run(["scoot", "--version"], capture_output=True, text=True, timeout=15, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    out = (r.stdout or "").strip()
+    word = out.split()[-1] if out else ""
+    return word if version_tuple(word) else ""
+
+
+def scoot_latest_version(settings: Settings, now: float | None = None) -> str:
+    """The newest scootcli on PyPI, asked at most once a day and remembered in the state
+    dir. "" when it is not known (never asked, offline, or AAW_NO_UPDATE_CHECK is set):
+    the request carries nothing but the package name."""
+    if os.environ.get("AAW_NO_UPDATE_CHECK", "").strip() not in ("", "0"):
+        return ""
+    now = time.time() if now is None else now
+    cache = settings.state_dir / "scoot_latest.json"
+    known, due = "", 0.0
+    try:
+        data = json.loads(cache.read_text())
+        known, due = str(data.get("version") or ""), float(data.get("next_check") or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    if now < due:
+        return known
+    try:
+        import urllib.request
+        with urllib.request.urlopen(SCOOT_PYPI_URL, timeout=SCOOT_CHECK_TIMEOUT_S) as resp:
+            latest = str(json.loads(resp.read().decode("utf-8"))["info"]["version"])
+    except Exception:  # noqa: BLE001  (offline, a proxy page, a changed answer: ask again in an hour)
+        latest = ""
+    wait = SCOOT_CHECK_RETRY_S
+    if version_tuple(latest):
+        known, wait = latest, SCOOT_CHECK_EVERY_S
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps({"version": known, "next_check": now + wait}))
+    except OSError:
+        pass
+    return known
+
+
+def scoot_update_command() -> str:
+    """How this scoot was installed decides how it is updated: pipx, the one-line
+    installer (a zipapp on PATH), or pip in the Python environment that holds it."""
+    import zipfile
+    found = shutil.which("scoot")
+    if not found:
+        return ""
+    real = os.path.realpath(found)
+    if "/pipx/" in real:
+        return "pipx upgrade scootcli"
+    try:
+        if zipfile.is_zipfile(real):
+            return SCOOT_INSTALLER
+        with open(real, "rb") as f:
+            first = f.readline(512).decode("utf-8", "replace").strip()
+    except OSError:
+        first = ""
+    words = first[2:].split() if first.startswith("#!") else []
+    if len(words) > 1 and os.path.basename(words[0]) == "env":  # "#!/usr/bin/env python3"
+        words = words[1:]
+    python = words[0] if words else ""
+    if "python" in os.path.basename(python):
+        return f"{python} -m pip install --upgrade scootcli"
+    return "pip install --upgrade scootcli"
+
+
+def scoot_update(settings: Settings) -> dict[str, str] | None:
+    """{"installed", "latest", "command"} when PyPI has a newer scoot than the one on
+    PATH, else None (scoot absent, up to date, a dev build, or the latest not known)."""
+    if not scoot_installed():
+        return None
+    installed = scoot_installed_version()
+    have = version_tuple(installed)
+    if have is None:
+        return None
+    latest = scoot_latest_version(settings)
+    newest = version_tuple(latest)
+    if newest is None or newest <= have:
+        return None
+    return {"installed": installed, "latest": latest, "command": scoot_update_command()}
