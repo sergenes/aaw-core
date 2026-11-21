@@ -3,9 +3,9 @@
 [![PyPI](https://img.shields.io/pypi/v/aaw-core.svg?label=PyPI)](https://pypi.org/project/aaw-core/)
 [![tests](https://github.com/sergenes/aaw-core/actions/workflows/ci.yml/badge.svg)](https://github.com/sergenes/aaw-core/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)](#install)
-[![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%7C%20Codex%20%7C%20Gemini%20%7C%20Grok%20%7C%20Cursor%20%7C%20scoot-orange.svg)](#supported-agents)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/sergenes/aaw-core#install)
+[![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%7C%20Codex%20%7C%20Gemini%20%7C%20Grok%20%7C%20Cursor%20%7C%20scoot-orange.svg)](https://github.com/sergenes/aaw-core#supported-agents)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/sergenes/aaw-core/blob/main/LICENSE)
 
 What changed in each version: [GitHub Releases](https://github.com/sergenes/aaw-core/releases).
 
@@ -14,7 +14,7 @@ Run Claude Code, Codex, Gemini CLI, Grok, Cursor, and scoot on your own Mac or L
 
 > **Status: beta.**
 > This is the engine behind the shipping Agents At Work apps: the Mac app bundles it, and the hosted relay runs it.
-> The wire protocol with the phone apps is stable ([the contract](./docs/protocol.contract.md)); the CLI flags and config keys can still change between 0.x releases.
+> The wire protocol with the phone apps is stable ([the contract](https://github.com/sergenes/aaw-core/blob/main/docs/protocol.contract.md)); the CLI flags and config keys can still change between 0.x releases.
 
 ## What is open and what is not
 
@@ -45,10 +45,10 @@ your computer                                          your phone
 
 ## Docs
 
-- [Architecture](./docs/architecture.md): the daemon, the hooks, the store, and the relay, and how a message travels.
-- [The protocol contract](./docs/protocol.contract.md): encryption, events, commands, relay frames, push, and the limits the relay enforces.
-- [Hosting the relay yourself](./relay/README.md): docker compose, TLS, and backups.
-- [Contributing](./CONTRIBUTING.md): DCO sign-off, the PR flow, and how releases are cut.
+- [Architecture](https://github.com/sergenes/aaw-core/blob/main/docs/architecture.md): the daemon, the hooks, the store, and the relay, and how a message travels.
+- [The protocol contract](https://github.com/sergenes/aaw-core/blob/main/docs/protocol.contract.md): encryption, events, commands, relay frames, push, and the limits the relay enforces.
+- [Hosting the relay yourself](https://github.com/sergenes/aaw-core/blob/main/relay/README.md): docker compose, TLS, and backups.
+- [Contributing](https://github.com/sergenes/aaw-core/blob/main/CONTRIBUTING.md): DCO sign-off, the PR flow, and how releases are cut.
 
 ## Install
 
@@ -138,8 +138,8 @@ Claude Code, Codex CLI, Gemini CLI, Grok CLI, Cursor, and [Scoot](https://github
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Contributions use the DCO (`git commit -s`). Security reports: see [SECURITY.md](SECURITY.md).
+See [CONTRIBUTING.md](https://github.com/sergenes/aaw-core/blob/main/CONTRIBUTING.md). Contributions use the DCO (`git commit -s`). Security reports: see [SECURITY.md](https://github.com/sergenes/aaw-core/blob/main/SECURITY.md).
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](https://github.com/sergenes/aaw-core/blob/main/LICENSE).
