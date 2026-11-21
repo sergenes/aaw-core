@@ -136,6 +136,9 @@ The phone is the primary channel, and the computer itself also gets a banner whe
 
 Claude Code, Codex CLI, Gemini CLI, Grok CLI, Cursor, and [Scoot](https://github.com/sergenes/scootcli) (local models with Ollama, plus cloud models). Not affiliated with Anthropic, OpenAI, Google, xAI, Anysphere, or Ollama.
 
+scoot ships often, so `aaw status` says when PyPI has a newer one and prints the command that updates it.
+It asks PyPI at most once a day and sends nothing but the package name; set `AAW_NO_UPDATE_CHECK=1` to switch the check off.
+
 ## Contributing
 
 See [CONTRIBUTING.md](https://github.com/sergenes/aaw-core/blob/main/CONTRIBUTING.md). Contributions use the DCO (`git commit -s`). Security reports: see [SECURITY.md](https://github.com/sergenes/aaw-core/blob/main/SECURITY.md).

@@ -3,6 +3,7 @@ the known-sessions registry, and the guards of start_session."""
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -106,3 +107,82 @@ def test_list_sessions_counts_any_number_of_windows_as_attached(monkeypatch):
     monkeypatch.setattr(sessions.tmux, "tmux_run",
                         lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=out, stderr=""))
     assert {s.project: s.attached for s in sessions.list_sessions()} == {"one": True, "two": True, "none": False}
+
+
+# ── a newer scoot on PyPI ────────────────────────────────────────────────────
+
+
+class _PyPI:
+    """urlopen stand-in that answers with a version and counts the calls."""
+
+    def __init__(self, version="0.16.0", fail=False):
+        self.version, self.fail, self.calls = version, fail, 0
+
+    def __call__(self, url, timeout=None):
+        import io
+        self.calls += 1
+        assert url == sessions.SCOOT_PYPI_URL
+        if self.fail:
+            raise OSError("offline")
+        return io.BytesIO(json.dumps({"info": {"version": self.version}}).encode())
+
+
+def _scoot_on_path(monkeypatch, tmp_path, version="0.15.0", body="#!/usr/bin/env python3\n"):
+    exe = tmp_path / "bin" / "scoot"
+    exe.parent.mkdir(parents=True, exist_ok=True)
+    exe.write_text(body)
+    monkeypatch.setattr(sessions.shutil, "which", lambda name: str(exe) if name == "scoot" else None)
+    monkeypatch.setattr(sessions.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
+        a, 0, f"scoot {version}\n", ""))
+    return exe
+
+
+def test_scoot_update_is_offered_when_pypi_has_a_newer_one(tmp_path, monkeypatch, settings):
+    import urllib.request
+    monkeypatch.delenv("AAW_NO_UPDATE_CHECK")
+    pypi = _PyPI("0.16.0")
+    monkeypatch.setattr(urllib.request, "urlopen", pypi)
+    _scoot_on_path(monkeypatch, tmp_path, "0.15.0")
+    update = sessions.scoot_update(settings)
+    assert update == {"installed": "0.15.0", "latest": "0.16.0", "command": "python3 -m pip install --upgrade scootcli"}
+    # asked once a day: the second look reads the remembered answer
+    assert sessions.scoot_update(settings) == update and pypi.calls == 1
+    # up to date, ahead of PyPI (a checkout), or a dev build: nothing to offer
+    for version in ("0.16.0", "0.17.0", "0.16.0.dev3", "unknown"):
+        _scoot_on_path(monkeypatch, tmp_path, version)
+        assert sessions.scoot_update(settings) is None, version
+    assert pypi.calls == 1
+
+
+def test_scoot_update_stays_quiet_offline_and_when_switched_off(tmp_path, monkeypatch, settings):
+    import urllib.request
+    pypi = _PyPI(fail=True)
+    monkeypatch.setattr(urllib.request, "urlopen", pypi)
+    _scoot_on_path(monkeypatch, tmp_path, "0.15.0")
+    assert sessions.scoot_update(settings) is None and pypi.calls == 0  # AAW_NO_UPDATE_CHECK=1
+    monkeypatch.delenv("AAW_NO_UPDATE_CHECK")
+    assert sessions.scoot_update(settings) is None and pypi.calls == 1  # offline
+    assert sessions.scoot_update(settings) is None and pypi.calls == 1  # and not asked again at once
+    # an hour later it asks again, and a network that is back answers
+    pypi.fail = False
+    assert sessions.scoot_latest_version(settings, now=time.time() + sessions.SCOOT_CHECK_RETRY_S + 1) == "0.16.0"
+    assert pypi.calls == 2
+    # 0.9 is older than 0.15: versions compare as numbers, not as text
+    assert sessions.version_tuple("0.9.0") < sessions.version_tuple("scoot 0.15.0")
+
+
+def test_scoot_update_command_follows_how_scoot_was_installed(tmp_path, monkeypatch):
+    import zipfile
+    exe = _scoot_on_path(monkeypatch, tmp_path, body="#!/opt/miniconda3/bin/python\nimport scootcli\n")
+    assert sessions.scoot_update_command() == "/opt/miniconda3/bin/python -m pip install --upgrade scootcli"
+    exe.write_text("#!/bin/sh\nexec something\n")
+    assert sessions.scoot_update_command() == "pip install --upgrade scootcli"
+    with zipfile.ZipFile(exe, "w") as z:  # the one-line installer puts a zipapp on PATH
+        z.writestr("__main__.py", "")
+    assert sessions.scoot_update_command() == sessions.SCOOT_INSTALLER
+    venv = tmp_path / "pipx" / "venvs" / "scootcli" / "bin"
+    venv.mkdir(parents=True)
+    (venv / "scoot").write_text("#!/x/python\n")
+    exe.unlink()
+    exe.symlink_to(venv / "scoot")
+    assert sessions.scoot_update_command() == "pipx upgrade scootcli"
