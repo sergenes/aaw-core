@@ -341,6 +341,10 @@ def status_snapshot(settings: Settings) -> dict:
         "computer_name": ident.computer_name if ident else settings.computer_name,
         "state_dir": str(settings.state_dir),
         "version": __version__,
+        # 0.1.23: whether agents may propose notes and messages (`aaw peers on`), and
+        # where the shared notes live.
+        "peers": settings.peers,
+        "knowledge_dir": str(settings.state_dir / "knowledge"),
     }
 
 
@@ -631,6 +635,170 @@ def cmd_mobile_mode(a, settings: Settings) -> None:
     print("mobile mode:", "on" if settings.mobile_mode_file.exists() else "off")
 
 
+def cmd_answer(a, settings: Settings) -> None:
+    """Answer the question a session is waiting on, from this computer."""
+    from aaw_core.transport.base import LocalLog
+    t = _transport(settings, a.id)
+    try:
+        question_id = a.question or (t.get_project().get("pending_question_id") or "")
+        if not question_id:
+            die(f"{a.id} is not waiting for an answer")
+        asked = next((e for e in reversed(LocalLog(settings.sessions_dir, a.id).read())
+                      if e.get("type") == "question" and e.get("id") == question_id), {})
+        options = [str(o) for o in asked.get("options") or []]
+        answer = " ".join(a.answer).strip()
+        if not answer:
+            print(asked.get("question") or "(the question is not in this computer's log)")
+            if asked.get("context"):
+                print(textwrap.indent(str(asked["context"]), "  "))
+            die("give an answer" + (": " + " | ".join(options) if options else ""))
+        if options:
+            match = [o for o in options if o.lower() == answer.lower()]
+            if not match:
+                die(f"the answer must be one of: {' | '.join(options)}")
+            answer = match[0]
+        t.write_answer(question_id, answer)
+        t.flush()
+    finally:
+        t.stop()
+    print(f"Answered {a.id}: {answer}")
+
+
+# ── agents that know about each other (see host/peers.py) ───────────────────
+
+
+def _caller() -> tuple[str, str]:
+    """The session this command runs in (its id and agent), or ("", "") in a plain terminal."""
+    return os.environ.get("AAW_PROJECT", ""), os.environ.get("AAW_AGENT", "")
+
+
+def _text_arg(words: list[str] | None) -> str:
+    """The text given as arguments, or read from stdin when there is none."""
+    text = " ".join(words or []).strip()
+    if not text and not sys.stdin.isatty():
+        text = sys.stdin.read().strip()
+    return text
+
+
+def cmd_peers(a, settings: Settings) -> None:
+    from aaw_core.host import peers
+    if a.switch in ("on", "off"):
+        save_config(settings.state_dir, peers=a.switch == "on")
+        print("Agents may now propose notes and messages to other sessions; you approve each one on a card."
+              if a.switch == "on" else "Agents can no longer propose notes or messages to other sessions.")
+        return
+    me, _ = _caller()
+    rows = peers.others(settings, me)
+    if a.json:
+        print(json.dumps({"enabled": settings.peers, "sessions": rows}))
+        return
+    if not rows:
+        print("No sessions are running.")
+    for r in rows:
+        mark = "  (this session)" if r["me"] else ""
+        print(f"  {r['id']:24s} {r['agent'] or '?':8s} {r['status']:8s} {r['path']}{mark}")
+    if not settings.peers:
+        print(peers.OFF_HINT)
+    elif me:
+        print('Send one a message with: aaw tell <session> "<text>"')
+
+
+def cmd_tell(a, settings: Settings) -> None:
+    from aaw_core.host import peers
+    me, agent = _caller()
+    if not me:
+        die("`aaw tell` is for an agent inside a session. From a terminal, use `aaw send <session> <text>`.")
+    if not settings.peers:
+        die(peers.OFF_HINT)
+    text = _text_arg(a.text)
+    if not text:
+        die('nothing to send. Usage: aaw tell <session> "<text>"')
+    if len(text) > peers.MAX_MESSAGE:
+        die(f"the message is longer than {peers.MAX_MESSAGE} characters. Write it to a file and send its path.")
+    if a.id == me:
+        die("that is this session")
+    running = peers.others(settings, me)
+    if not any(r["id"] == a.id for r in running):
+        names = ", ".join(r["id"] for r in running if not r["me"]) or "none"
+        die(f"{a.id} is not running. Running sessions: {names}")
+    if not settings.relay_url or load_identity(settings) is None:
+        die("this computer is not linked to a phone, so nobody can approve the message")
+    if peers.pending_request(settings, me):
+        die("one proposal from this session is already waiting for the user. Wait for its outcome.")
+    to_agent = next((r["agent"] for r in running if r["id"] == a.id), "")
+    peers.submit(settings, {"kind": "tell", "from": me, "agent": agent, "to": a.id,
+                            "to_agent": to_agent, "text": text})
+    print(f"Asked the user to approve your message to {a.id}. It is sent only if they approve.\n"
+          "End your turn now: the answer, or word that it was not sent, arrives as a new prompt.")
+
+
+def cmd_know(a, settings: Settings) -> None:
+    from aaw_core.host import knowledge, peers
+    me, agent = _caller()
+    action = a.action or "list"
+    if action == "list":
+        notes = knowledge.list_notes(settings)
+        if a.json:
+            print(json.dumps([{"name": n.name, "title": n.title, "description": n.description} for n in notes]))
+            return
+        if not notes:
+            print(f"No shared notes yet. They live in {knowledge.folder(settings)}")
+        for n in notes:
+            print(f"  {n.name:24s} {n.title}" + (f": {n.description}" if n.description else ""))
+        return
+    if action == "search":
+        if not a.args:
+            die("usage: aaw know search <words>")
+        found = knowledge.search(settings, a.args)
+        if not found:
+            print("No note matches.")
+        for n in found:
+            print(f"## {n.name}: {n.title}\n{n.body}\n")
+        return
+    name = (a.args or [""])[0]
+    if action == "show":
+        note = knowledge.read(settings, name)
+        if note is None:
+            die(f"no note named {name!r}. `aaw know` lists them.")
+        print(f"# {note.title}\n" + (f"{note.description}\n" if note.description else "")
+              + (f"(added {note.added})\n" if note.added else "") + f"\n{note.body}")
+        return
+    if action == "remove":
+        if knowledge.read(settings, name) is None:
+            die(f"no note named {name!r}")
+        if not me:  # the user, in a terminal: their own file
+            knowledge.remove(settings, name)
+            print(f"Removed {name}.")
+            return
+        _propose(settings, peers, me, {"kind": "know_remove", "from": me, "agent": agent, "name": name})
+        print(f"Asked the user to approve removing {name}.")
+        return
+    # add
+    body = (a.text or "").strip() or (sys.stdin.read().strip() if not sys.stdin.isatty() else "")
+    title = (a.title or name).strip()
+    why_not = knowledge.check(name, title, body)
+    if why_not:
+        die(why_not)
+    note = knowledge.Note(name=name, title=title, description=(a.description or "").strip(),
+                          added=knowledge.stamp(agent, me), body=body)
+    if not me:
+        print(f"Saved {knowledge.write(settings, note)}")
+        return
+    from dataclasses import asdict
+    _propose(settings, peers, me, {"kind": "know_add", "from": me, "agent": agent, "note": asdict(note)})
+    print(f"Asked the user to approve the note {name}. It is saved only if they approve; carry on meanwhile.")
+
+
+def _propose(settings: Settings, peers, me: str, request: dict) -> None:
+    if not settings.peers:
+        die(peers.OFF_HINT)
+    if not settings.relay_url or load_identity(settings) is None:
+        die("this computer is not linked to a phone, so nobody can approve this")
+    if peers.pending_request(settings, me):
+        die("one proposal from this session is already waiting for the user. Wait for its outcome.")
+    peers.submit(settings, request)
+
+
 def cmd_models(a, settings: Settings) -> None:
     scoot = sessions.scoot_status()
     models = scoot[0] if scoot is not None else None
@@ -878,6 +1046,28 @@ def build_parser() -> argparse.ArgumentParser:
     s = sp.add_parser("mobile-mode", help="route permission prompts to the phone")
     s.add_argument("state", choices=["on", "off", "status"])
     s.set_defaults(fn=cmd_mobile_mode)
+    s = sp.add_parser("answer", help="answer the question a session is waiting on (as the phone would)")
+    s.add_argument("id")
+    s.add_argument("answer", nargs="*", help="one of the question's options, or free text when it has none")
+    s.add_argument("--question", help="the question's id (default: the one the session waits on)")
+    s.set_defaults(fn=cmd_answer)
+    s = sp.add_parser("peers", help="the other agent sessions on this computer; `on`/`off` lets agents reach them")
+    s.add_argument("switch", nargs="?", choices=["on", "off"],
+                   help="let agents propose notes and messages (each one needs your approval), or stop that")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_peers)
+    s = sp.add_parser("tell", help="(for an agent) propose a message to another session; the user approves it")
+    s.add_argument("id", help="the session to message, as `aaw peers` lists it")
+    s.add_argument("text", nargs="*", help="the message (or pass it on stdin)")
+    s.set_defaults(fn=cmd_tell)
+    s = sp.add_parser("know", help="notes shared by every agent session: list, show, search, add, remove")
+    s.add_argument("action", nargs="?", choices=["list", "show", "search", "add", "remove"])
+    s.add_argument("args", nargs="*", help="a note's name, or the words to search for")
+    s.add_argument("--title")
+    s.add_argument("--description", help="one line saying what the note is for")
+    s.add_argument("--text", help="the note itself (or pass it on stdin)")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_know)
     s = sp.add_parser("models", help="list the models scoot can run")
     s.add_argument("--provider", help="only this provider (openai, anthropic, ollama)")
     s.add_argument("--json", action="store_true", help="the list as JSON (null when scoot is not installed)")

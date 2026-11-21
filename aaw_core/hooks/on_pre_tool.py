@@ -13,6 +13,7 @@ own dialog; it never leaves the phone with a stale question card.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 
@@ -55,7 +56,10 @@ ALWAYS_ASK = {
 def approve_output(agent: str) -> tuple[str, int]:
     """(stdout, exit code) that approves the tool call for this agent."""
     if agent == "codex":
-        return json.dumps({"hookSpecificOutput": {"permissionDecision": "approve"}}), 0
+        # Codex checks the reply against its schema (seen in 0.162): the event's name is
+        # required and the decision is allow, deny or ask. A reply it cannot read is a
+        # failed hook, and a failed hook lets the tool call run.
+        return json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"}}), 0
     if agent == "gemini":
         return json.dumps({"decision": "allow"}), 0
     if agent == "cursor":
@@ -68,7 +72,9 @@ def approve_output(agent: str) -> tuple[str, int]:
 def block_output(agent: str, reason: str = "Denied from mobile app.") -> tuple[str, int]:
     """(stdout, exit code) that blocks the tool call for this agent."""
     if agent == "codex":
-        return json.dumps({"hookSpecificOutput": {"permissionDecision": "deny",
+        # Without the event's name Codex 0.162 called this reply invalid and ran the denied
+        # command anyway (reproduced 2026-11-21: "No" on the phone, the file was written).
+        return json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                   "permissionDecisionReason": reason}}), 0
     if agent == "grok":
         return json.dumps({"decision": "block", "reason": reason}), 2  # Grok needs exit 2 to deny
@@ -109,6 +115,11 @@ def normalize_payload(agent: str, payload: dict) -> dict:
     return payload
 
 
+# Each agent's name for its shell tool. Grok called it run_terminal_cmd and now (seen
+# 2026-11-21) run_terminal_command; its card said "Allow run_terminal_command?" with no command.
+SHELL_TOOLS = ("Bash", "run_shell_command", "Shell", "run_terminal_cmd", "run_terminal_command", "run_shell")
+
+
 def build_question(tool_name: str, tool_input: dict) -> str:
     """The human-readable question on the permission card."""
     file_path = tool_input.get("file_path") or tool_input.get("path") or ""  # scoot says "path"
@@ -117,7 +128,7 @@ def build_question(tool_name: str, tool_input: dict) -> str:
         return f"Create / overwrite: {file_path or 'a file'}"
     if tool_name in ("Edit", "MultiEdit", "replace_in_file", "edit_file"):
         return f"Edit: {file_path or 'a file'}"
-    if tool_name in ("Bash", "run_shell_command", "Shell", "run_terminal_cmd", "run_shell"):
+    if tool_name in SHELL_TOOLS and cmd:
         return f"Run: {cmd[:140]}"
     if tool_name == "open_editor":  # scoot: opens the file in the user's editor
         return f"Open in the editor: {file_path or 'a file'}"
@@ -135,11 +146,30 @@ def build_question(tool_name: str, tool_input: dict) -> str:
 # ── the decision ────────────────────────────────────────────────────────────
 
 
+OWN_COMMANDS = ("tell", "peers", "know")  # each reads only, or asks the user on its own card
+
+
+def asks_for_itself(command: str) -> bool:
+    """A plain `aaw tell`, `aaw peers` or `aaw know` call: one command and nothing else
+    on the line. Its own card follows (see host/peers.py), so a tool card in front of it
+    would ask the user twice about one thing."""
+    import shlex
+    if any(c in command for c in ";|&$`<>\n\r"):
+        return False
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return False
+    return len(words) >= 2 and os.path.basename(words[0]) == "aaw" and words[1] in OWN_COMMANDS
+
+
 def decide(settings: Settings, project: str, agent: str, payload: dict) -> tuple[str, int]:
     """Ask the phone and return (stdout, exit code). ("", 0) means "say nothing"."""
     tool_name = payload.get("tool_name", "")
     tool_input = payload.get("tool_input") or {}
     if tool_name in READONLY.get(agent, ()):
+        return approve_output(agent)
+    if tool_name in SHELL_TOOLS and asks_for_itself(str(tool_input.get("command") or "")):
         return approve_output(agent)
     always_ask = tool_name in ALWAYS_ASK.get(agent, ())
     question = build_question(tool_name, tool_input)

@@ -31,7 +31,7 @@ def summarize(tool_name: str, tool_input: dict) -> str:
         return f"Wrote {fp}" if fp else "Wrote file"
     if tool_name in ("Edit", "MultiEdit", "search_replace"):  # search_replace: Grok's Edit
         return f"Edited {fp}" if fp else "Edited file"
-    if tool_name in ("Bash", "Shell", "run_terminal_cmd"):  # Shell: Cursor; run_terminal_cmd: Grok
+    if tool_name in ("Bash", "Shell", "run_terminal_cmd", "run_terminal_command"):  # Shell: Cursor; run_terminal_*: Grok
         return f"Ran: {short_cmd}" if short_cmd else "Ran command"
     if tool_name in ("Read", "read_file"):  # read_file: Grok
         return f"Read {fp}" if fp else "Read file"

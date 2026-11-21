@@ -1,0 +1,4 @@
+# A made-up value in a test that checks a note holding a credential is refused
+# (tests/test_peers.py). The test now builds the string in pieces; this commit keeps the
+# literal in the branch's history.
+a92bd0dd71bf01992a195214944015f6072cd418:tests/test_peers.py:generic-api-key:398

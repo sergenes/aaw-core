@@ -163,3 +163,16 @@ def test_extend_path_prepends_existing_user_bins(home, monkeypatch):
     import os
     assert os.environ["PATH"].split(os.pathsep)[0] == str(home / ".local" / "bin")
     assert os.environ["PATH"].endswith("/usr/bin")
+
+
+def test_gemini_hook_timeouts_are_in_milliseconds(home):
+    """Gemini CLI counts a hook's timeout in milliseconds. Written in seconds, its hooks had
+    30 ms and 360 ms: Gemini reported them as failed at every turn (seen 2026-11-21), and
+    the phone's answer to a tool card had no time to arrive."""
+    hi.update_gemini_hooks()
+    hooks = json.loads((home / ".gemini" / "settings.json").read_text())["hooks"]
+    timeouts = {event: group[0]["hooks"][0]["timeout"] for event, group in hooks.items()}
+    assert timeouts == {"BeforeTool": hi.PRE_TOOL_TIMEOUT * 1000, "AfterAgent": 30_000, "SessionEnd": 30_000}
+    hi.update_codex_hooks()  # the others stay in seconds
+    codex = json.loads((home / ".codex" / "hooks.json").read_text())["hooks"]
+    assert codex["Stop"][0]["hooks"][0]["timeout"] == 30
