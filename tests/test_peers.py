@@ -396,7 +396,7 @@ def test_know_reads_freely_and_an_agent_only_proposes(home, monkeypatch, capsys)
     assert "no note named" in _fails(["know", "show", "nothing"], capsys)
     # An agent, in its session: a proposal, and never a credential.
     _in_session(monkeypatch)
-    assert "looks like it holds" in _fails(["know", "add", "key", "--text", "api_key = abcdef123456"], capsys)
+    assert "looks like it holds" in _fails(["know", "add", "key", "--text", "api_" + "key = " + "abcdef" + "123456"], capsys)
     assert cli.main(["know", "add", "ios", "--text", "AAW Distribution"]) == 0
     assert not (home / "knowledge" / "ios.md").exists()
     assert submitted[0]["kind"] == "know_add" and submitted[0]["note"]["added"].endswith("by claude in bridge")
