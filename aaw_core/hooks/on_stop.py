@@ -121,6 +121,13 @@ def main() -> int:
                 transport.set_project_status("stopped", pending_question_id="")
                 hook_log(settings, "on_stop", f"error forwarded: {api_error_text[:80]}")
 
+        if not is_error and (settings.state_dir / "peer" / "awaiting" / f"{project}.json").exists():
+            # This turn may have answered another agent's message: the answer goes back to it.
+            from aaw_core.host import peers
+            done = peers.return_answer(settings, project, agent, response_text, open_transport)
+            if done:
+                hook_log(settings, "on_stop", f"peers: {done}")
+
         message, level = status_message(reason=reason, stop_type=stop_type, api_error_text=api_error_text,
                                         response_text=response_text, is_final_stop=is_final_stop, agent=agent)
         if message:

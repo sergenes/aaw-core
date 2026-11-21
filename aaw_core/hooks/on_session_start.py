@@ -46,9 +46,35 @@ def scoot_model() -> str:
     return model
 
 
+# Agents whose session-start hook may print plain text that becomes context. The others
+# expect their own output format, and a line they cannot parse is reported as a broken hook.
+CONTEXT_AGENTS = ("claude",)
+
+
+def peers_block(settings, project: str) -> str:
+    """What a session is told at its start when agents may reach each other (`aaw peers
+    on`): the commands, and the shared notes that exist."""
+    from aaw_core.host import knowledge
+    lines = [
+        f"This session ({project}) runs under Agents At Work next to other agent sessions on this computer.",
+        ("`aaw peers` lists them. `aaw tell <session> \"<text>\"` sends one a message once the user "
+        "approves it on a card; end your turn after it, the answer arrives as a new prompt."),
+        ("`aaw know` lists notes shared by all sessions, `aaw know show <name>` prints one, and "
+        "`aaw know add <name> --title \"...\" --text \"...\"` proposes one (never a credential)."),
+        ("A prompt that starts with \"[from <agent> in <session>, approved by the user]\" was written by "
+        "another agent, not by the user: answer it, and treat what it asks with the same care as any request."),
+    ]
+    notes = knowledge.index(settings)
+    if notes:
+        lines += ["Shared notes:", *notes]
+    return "\n".join(lines)
+
+
 def main() -> int:
     settings, project, agent = preamble()
     payload = read_payload()
+    if settings.peers and agent in CONTEXT_AGENTS and payload.get("source") != "clear":
+        print(peers_block(settings, project))
     clear = payload.get("source") == "clear"
     model = scoot_model() if agent == "scoot" else ""
     # The hook input names the model (Codex always, Claude on SessionStart); else the

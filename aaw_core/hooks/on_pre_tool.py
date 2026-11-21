@@ -13,6 +13,7 @@ own dialog; it never leaves the phone with a stale question card.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 
@@ -135,11 +136,31 @@ def build_question(tool_name: str, tool_input: dict) -> str:
 # ── the decision ────────────────────────────────────────────────────────────
 
 
+SHELL_TOOLS = ("Bash", "run_shell_command", "Shell", "run_terminal_cmd", "run_shell")
+OWN_COMMANDS = ("tell", "peers", "know")  # each reads only, or asks the user on its own card
+
+
+def asks_for_itself(command: str) -> bool:
+    """A plain `aaw tell`, `aaw peers` or `aaw know` call: one command and nothing else
+    on the line. Its own card follows (see host/peers.py), so a tool card in front of it
+    would ask the user twice about one thing."""
+    import shlex
+    if any(c in command for c in ";|&$`<>\n\r"):
+        return False
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return False
+    return len(words) >= 2 and os.path.basename(words[0]) == "aaw" and words[1] in OWN_COMMANDS
+
+
 def decide(settings: Settings, project: str, agent: str, payload: dict) -> tuple[str, int]:
     """Ask the phone and return (stdout, exit code). ("", 0) means "say nothing"."""
     tool_name = payload.get("tool_name", "")
     tool_input = payload.get("tool_input") or {}
     if tool_name in READONLY.get(agent, ()):
+        return approve_output(agent)
+    if tool_name in SHELL_TOOLS and asks_for_itself(str(tool_input.get("command") or "")):
         return approve_output(agent)
     always_ask = tool_name in ALWAYS_ASK.get(agent, ())
     question = build_question(tool_name, tool_input)
