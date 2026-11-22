@@ -62,6 +62,14 @@ _RECONNECT_MAX = 30.0
 _OPEN_TIMEOUT = 30.0
 _PING_INTERVAL = 20.0
 _PING_TIMEOUT = 60.0
+# A request the relay did not answer may mean the socket is dead while the system still
+# calls it open (2026-11-21: every socket of one Mac died at once, the Mac awake, and the
+# phones saw no heartbeat for 80 s, the ping interval plus its timeout). So an unanswered
+# request asks at once with a ping of its own and drops the socket when that gets no pong.
+# A slow host or a slow relay still answers a ping, so this does not bring back the churn
+# the wide limits above ended.
+_PROBE_TIMEOUT = 10.0
+_CLOSE_TIMEOUT = 3.0  # a dead socket answers no close frame either
 
 
 def new_token() -> str:
@@ -105,6 +113,8 @@ class RelayTransport:
         self._stop = threading.Event()
         self._unsent: dict | None = None  # a frame taken off the queue that the socket refused
         self._ws = None  # the live socket, for stop() to close from another thread
+        self._dead: asyncio.Event | None = None  # set when a probe of the live socket got no pong
+        self._probing = False
         self.connected = threading.Event()
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
@@ -159,7 +169,8 @@ class RelayTransport:
         while not self._stop.is_set():
             try:
                 async with websockets.connect(self.relay_url, max_size=8 * 1024 * 1024, open_timeout=_OPEN_TIMEOUT,
-                                              ping_interval=_PING_INTERVAL, ping_timeout=_PING_TIMEOUT) as ws:
+                                              ping_interval=_PING_INTERVAL, ping_timeout=_PING_TIMEOUT,
+                                              close_timeout=_CLOSE_TIMEOUT) as ws:
                     await ws.send(json.dumps({
                         "type": "hello", "role": "computer", "token": self.token,
                         "computer_id": self.computer_id, "computer_name": self.computer_name,
@@ -200,18 +211,50 @@ class RelayTransport:
                 self._on_frame(json.loads(raw))
 
         self._ws = ws
+        self._dead = asyncio.Event()
         send_task = asyncio.create_task(sender())
         recv_task = asyncio.create_task(receiver())
+        dead_task = asyncio.create_task(self._dead.wait())
         try:
             # Whichever side fails ends the session and the loop reconnects: a failed
             # sender used to sit unnoticed while the receiver kept waiting.
-            done, _ = await asyncio.wait({send_task, recv_task}, return_when=asyncio.FIRST_COMPLETED)
+            done, _ = await asyncio.wait({send_task, recv_task, dead_task}, return_when=asyncio.FIRST_COMPLETED)
+            if dead_task in done:
+                raise ConnectionError(f"no pong from the relay in {_PROBE_TIMEOUT:.0f} s after an unanswered request")
             for task in done:
                 task.result()
         finally:
             self._ws = None
+            self._dead = None
             send_task.cancel()
             recv_task.cancel()
+            dead_task.cancel()
+
+    def _suspect(self) -> None:
+        """A request went unanswered: check the socket now instead of waiting for the
+        keepalive to notice. Called from the caller's thread; the probe runs on the loop."""
+        loop = self._loop
+        if loop is None or not self.connected.is_set():
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(self._probe(), loop)
+        except RuntimeError:  # the loop is closing
+            pass
+
+    async def _probe(self) -> None:
+        ws, dead = self._ws, self._dead
+        if ws is None or dead is None or self._probing:
+            return
+        self._probing = True
+        try:
+            pong = await ws.ping()
+            await asyncio.wait_for(pong, _PROBE_TIMEOUT)
+        except TimeoutError:
+            dead.set()  # ends this socket's session; a newer socket has its own event
+        except (OSError, websockets.WebSocketException):
+            pass  # the socket is closing already and the session will end by itself
+        finally:
+            self._probing = False
 
     # ── frames ────────────────────────────────────────────────────────────────
 
@@ -234,6 +277,7 @@ class RelayTransport:
         except TimeoutError:
             # A timeout carries no text of its own, and "project read failed: " in a log
             # reads like a fault. It is usually the computer waking for a moment in its sleep.
+            self._suspect()
             raise TimeoutError(f"no reply from the relay in {timeout:.0f} s") from None
         finally:
             with self._lock:
