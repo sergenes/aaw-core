@@ -592,3 +592,46 @@ def test_idle_prompt_narrow_pane_mid_turn_is_busy():
     assert detect.detect_idle_prompt(idle)
     # An ellipsis after "esc" that is not the hint ("escape…") does not hold idle back.
     assert detect.detect_idle_prompt("see escape…\n────────\n❯ \n")
+
+
+# ── Cursor's transcript folder ──────────────────────────────────────────────────
+
+def _cursor_transcript(home, folder: str, workspace: str | None, name: str = "t1") -> str:
+    base = home / ".cursor" / "projects" / folder
+    path = base / "agent-transcripts" / name / f"{name}.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text("{}\n")
+    if workspace is not None:
+        (base / ".workspace-trusted").write_text(json.dumps({"workspacePath": workspace}))
+    return str(path)
+
+
+def test_cursor_transcript_for_a_plain_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(detect.Path, "home", lambda: tmp_path)
+    expected = _cursor_transcript(tmp_path, "Users-x-proj", None)
+    assert detect.cursor_latest_transcript("/Users/x/proj") == expected
+
+
+def test_cursor_transcript_when_a_component_starts_with_a_dash(tmp_path, monkeypatch):
+    """Cursor writes one "-" for "/-": the old guess, one "-" per character, looked for
+    "tmp-c--Users-x-proj" and found nothing, so the turn's answer never reached the feed."""
+    monkeypatch.setattr(detect.Path, "home", lambda: tmp_path)
+    expected = _cursor_transcript(tmp_path, "tmp-c-Users-x-proj", None)
+    assert detect.cursor_latest_transcript("/tmp/c/-Users-x/proj") == expected
+
+
+def test_cursor_transcript_found_by_the_recorded_workspace(tmp_path, monkeypatch):
+    """Whatever Cursor names the folder, the workspace path it recorded inside decides."""
+    monkeypatch.setattr(detect.Path, "home", lambda: tmp_path)
+    project = tmp_path / "work" / "proj"
+    project.mkdir(parents=True)
+    expected = _cursor_transcript(tmp_path, "some-name-1a2b3c4", str(project))
+    _cursor_transcript(tmp_path, "other-project", str(tmp_path / "elsewhere"))
+    assert detect.cursor_latest_transcript(str(project)) == expected
+
+
+def test_cursor_transcript_skips_a_folder_recorded_for_another_path(tmp_path, monkeypatch):
+    """"/a/b" and "/a-b" give the same folder name; the recorded workspace tells them apart."""
+    monkeypatch.setattr(detect.Path, "home", lambda: tmp_path)
+    _cursor_transcript(tmp_path, "a-b", "/a-b")
+    assert detect.cursor_latest_transcript("/a/b") is None

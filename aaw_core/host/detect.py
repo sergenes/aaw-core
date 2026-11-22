@@ -570,18 +570,47 @@ def extract_gemini_response(pane: str) -> str:
 
 
 def cursor_latest_transcript(project_dir: str) -> str | None:
-    """The most recently modified Cursor transcript for this project directory. Cursor
-    encodes the path like Claude Code (non-alphanumerics to "-") but drops the leading
-    dash: "/Users/x/y" becomes "Users-x-y"."""
-    encoded = re.sub(r"[^a-zA-Z0-9]", "-", project_dir).lstrip("-")
-    transcripts_dir = Path.home() / ".cursor" / "projects" / encoded / "agent-transcripts"
+    """The most recently modified Cursor transcript for this project directory.
+
+    Cursor keeps a folder per workspace under ``~/.cursor/projects`` and writes the
+    workspace's real path into its ``.workspace-trusted`` file, so that file decides.
+    The folder's name is only a first guess: every run of non-alphanumerics becomes one
+    "-" and the ends are trimmed ("/Users/x/y" is "Users-x-y", "/tmp/a/-b" is
+    "tmp-a-b"). Guessing the name with one "-" per character missed a folder with a
+    component that starts with a dash or holds two separators in a row (2026-11-21)."""
+    projects = Path.home() / ".cursor" / "projects"
+    wanted = _real(project_dir)
+    names = [re.sub(r"[^a-zA-Z0-9]+", "-", path).strip("-") for path in dict.fromkeys((project_dir, wanted))]
+    # A guessed name can belong to another path ("/a/b" and "/a-b" give the same one): a
+    # folder that records a different workspace is not this project's.
+    folders = [f for f in (projects / name for name in names if name) if _cursor_workspace(f) in ("", wanted)]
     try:
-        candidates = list(transcripts_dir.glob("*/*.jsonl"))
+        folders += [f for f in projects.iterdir() if f not in folders and _cursor_workspace(f) == wanted]
     except OSError:
-        return None
-    if not candidates:
-        return None
-    return str(max(candidates, key=lambda p: p.stat().st_mtime))
+        pass
+    candidates: list[tuple[float, str]] = []
+    for folder in folders:
+        try:
+            candidates += [(p.stat().st_mtime, str(p)) for p in (folder / "agent-transcripts").glob("*/*.jsonl")]
+        except OSError:
+            continue
+    return max(candidates)[1] if candidates else None
+
+
+def _real(path: str) -> str:
+    try:
+        return os.path.realpath(path)
+    except OSError:
+        return path
+
+
+def _cursor_workspace(folder: Path) -> str:
+    """The workspace path Cursor recorded for one of its project folders, "" when it has none."""
+    try:
+        recorded = json.loads((folder / ".workspace-trusted").read_text(encoding="utf-8")).get("workspacePath")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    return _real(recorded) if isinstance(recorded, str) and recorded else ""
 
 
 def last_logged_assistant_message(log_path: Path) -> str:
