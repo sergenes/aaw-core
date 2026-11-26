@@ -124,15 +124,16 @@ A window that stopped responding can simply be closed; that does not stop the se
 ## Running on a laptop
 
 A sleeping computer cannot run agents or reach the phone.
-While a session runs, the engine stops the computer from sleeping on its own when idle (`caffeinate` on macOS, `systemd-inhibit` on Linux), but it cannot overrule a closed lid.
-A MacBook on battery always sleeps when the lid closes, and most Linux laptops suspend on lid close whatever inhibitors are held.
+While a session runs, the engine holds the computer awake (`caffeinate -d -i -m -s` on macOS, `systemd-inhibit` on Linux).
+On a MacBook connected to power that covers a closed lid too: the screen goes dark and the Mac stays awake underneath, so agents keep working and the phone keeps getting updates, with no external display attached.
+On battery the lid wins: a MacBook on battery always sleeps when the lid closes, and most Linux laptops suspend on lid close whatever inhibitors are held.
 While it sleeps, the phone shows the computer as offline, and a message sent during one of its short background wakes may not reach the agent: the phone says so, and you can send it again once the computer is awake.
 
 To keep agents working while you are away from the laptop:
 
 - Leave the lid open. Turn the brightness down if you like: the computer keeps running.
-- On a Mac, use closed-display mode: connect power and an external display (plus a keyboard and mouse), then close the lid.
-- On a Mac that must run with the lid closed and no display, `sudo pmset -a disablesleep 1` turns sleep off completely, on battery too, and `sudo pmset -a disablesleep 0` turns it back on. Remember to turn it back on: a Mac that cannot sleep drains its battery and gets hot in a bag.
+- On a MacBook, connect power and close the lid. No external display is needed (checked on Apple silicon; on an Intel Mac, try it once before you rely on it).
+- On a Mac that must run with the lid closed on battery, `sudo pmset -a disablesleep 1` turns sleep off completely, and `sudo pmset -a disablesleep 0` turns it back on. Remember to turn it back on: a Mac that cannot sleep drains its battery and gets hot in a bag.
 - On a Linux laptop, set `HandleLidSwitch=ignore` and `HandleLidSwitchExternalPower=ignore` in `/etc/systemd/logind.conf` and reboot. Some desktops (GNOME, KDE) have their own lid setting that also has to allow it.
 
 ## Hosting the relay yourself
