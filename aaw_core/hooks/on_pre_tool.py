@@ -56,10 +56,11 @@ ALWAYS_ASK = {
 def approve_output(agent: str) -> tuple[str, int]:
     """(stdout, exit code) that approves the tool call for this agent."""
     if agent == "codex":
-        # Codex checks the reply against its schema (seen in 0.162): the event's name is
-        # required and the decision is allow, deny or ask. A reply it cannot read is a
-        # failed hook, and a failed hook lets the tool call run.
-        return json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"}}), 0
+        # Codex acts on one PreToolUse decision only: deny. "allow" and "ask" make it print
+        # "Hook failed: PreToolUse hook returned unsupported permissionDecision:allow" (seen
+        # with the app-server daemon 0.172 on 2026-11-26) and carry on as if the hook had
+        # said nothing. Saying nothing is the approval: the call goes on to Codex's own rules.
+        return "", 0
     if agent == "gemini":
         return json.dumps({"decision": "allow"}), 0
     if agent == "cursor":
