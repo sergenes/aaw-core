@@ -109,7 +109,6 @@ def test_open_transport_needs_relay_and_identity(settings):
 
 @pytest.mark.parametrize("agent,expected", [
     ("claude", {"decision": "approve"}),
-    ("codex", {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"}}),
     ("gemini", {"decision": "allow"}),
     ("cursor", {"permission": "allow"}),
     ("scoot", {"permissionDecision": "allow"}),
@@ -117,6 +116,13 @@ def test_open_transport_needs_relay_and_identity(settings):
 def test_approve_output_per_agent(agent, expected):
     out, code = on_pre_tool.approve_output(agent)
     assert json.loads(out) == expected and code == 0
+
+
+def test_codex_is_approved_by_saying_nothing():
+    """2026-11-26: Codex (app-server daemon 0.172) printed "Hook failed: PreToolUse hook
+    returned unsupported permissionDecision:allow" after every approval from the phone. It
+    acts on deny only; an empty reply lets the call go on to its own rules."""
+    assert on_pre_tool.approve_output("codex") == ("", 0)
 
 
 def test_block_output_per_agent():
@@ -589,7 +595,7 @@ def test_nested_agent_hooks_are_ignored(settings):
     # A helper process of the owner that reports the owner's conversation is the owner.
     assert nested(800, "own-2") == ""
     # Agents whose process layout was never checked keep the old behavior.
-    for unchecked in ("codex", "gemini", "grok", "cursor", "scoot"):
+    for unchecked in ("codex", "grok", "cursor", "scoot"):
         assert nested(800, "child-3", agent=unchecked) == ""
     # No session id in the payload: not enough to call it nested.
     assert owner.nested_agent(settings, "kids", "claude", {}, table=table, pid=800) == ""
@@ -643,3 +649,153 @@ def test_preamble_drops_a_nested_agents_hook(monkeypatch, settings):
     assert e.value.code == 0
     assert "ignored" in (settings.logs_dir / "nested.log").read_text()
     common.read_payload()  # leave no cached payload behind for the next test
+
+
+# ── Codex: the session comes from the hook's own input ───────────────────────────────────
+
+
+def _codex_rollout(tmp_path, name, originator="codex-tui", source="cli"):
+    path = tmp_path / f"rollout-2026-11-26T23-28-10-{name}.jsonl"
+    path.write_text(json.dumps({"type": "session_meta", "payload": {"originator": originator, "source": source}}) + "\n")
+    return str(path)
+
+
+def _mirror(settings, project, **doc):
+    d = settings.state_dir / "projects"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{project}.json").write_text(json.dumps(doc))
+
+
+def test_a_codex_hook_finds_its_session_by_folder_not_by_environment(settings, tmp_path):
+    """2026-11-26: Codex fires every hook from one daemon shared by all its sessions, with the
+    environment of the session that started it (AAW_PROJECT=x-codex). A second session's
+    prompt and approval card went to x-codex; its own feed stayed empty."""
+    from aaw_core.hooks import owner
+
+    first, second = tmp_path / "x", tmp_path / "repro"
+    first.mkdir(), second.mkdir()
+    _mirror(settings, "x-codex", agent="codex", status="idle", project_path=str(first))
+    _mirror(settings, "nested-repro", agent="codex", status="running", project_path=str(second))
+    _mirror(settings, "repro-claude", agent="claude", status="running", project_path=str(second))
+    payload = {"session_id": "s1", "cwd": str(second), "transcript_path": _codex_rollout(tmp_path, "a")}
+
+    assert owner.is_codex_hook(payload, "claude") and owner.is_codex_hook({}, "codex")
+    assert not owner.is_codex_hook({}, "claude")
+    assert not owner.is_codex_hook({"transcript_path": "/x/.claude/projects/p/abc.jsonl"}, "codex")
+    assert owner.codex_session(settings, payload, "x-codex") == ("nested-repro", "")
+    # The daemon was started outside any bridged session: no environment at all.
+    assert owner.codex_session(settings, payload, "") == ("nested-repro", "")
+    # A folder reached through a symlink is the same folder.
+    link = tmp_path / "link"
+    link.symlink_to(second)
+    assert owner.codex_session(settings, {**payload, "cwd": str(link)}, "x-codex") == ("nested-repro", "")
+    # A Codex conversation in a folder with no bridged Codex session belongs to nobody,
+    # whatever the daemon's environment says.
+    other = tmp_path / "other"
+    other.mkdir()
+    assert owner.codex_session(settings, {**payload, "cwd": str(other)}, "x-codex") == ("", "")
+    assert owner.codex_session(settings, {**payload, "cwd": str(other)}, "repro-claude") == ("", "")
+
+
+def test_a_codex_hook_keeps_the_environment_when_the_record_cannot_say(settings, tmp_path):
+    from aaw_core.hooks import owner
+
+    payload = {"session_id": "s1", "cwd": str(tmp_path), "transcript_path": _codex_rollout(tmp_path, "a")}
+    # No record yet (the first hook can beat the daemon's first write), or one with no folder.
+    assert owner.codex_session(settings, payload, "fresh") == ("fresh", "")
+    _mirror(settings, "old", agent="codex", status="running")
+    assert owner.codex_session(settings, payload, "old") == ("old", "")
+    # No folder in the hook's input: nothing to look up, the environment stands.
+    _mirror(settings, "proj", agent="codex", status="running", project_path=str(tmp_path))
+    assert owner.codex_session(settings, {"session_id": "s1"}, "proj") == ("proj", "")
+    # A stopped record of the same folder does not hide the environment's session.
+    _mirror(settings, "proj", agent="codex", status="stopped", project_path=str(tmp_path))
+    assert owner.codex_session(settings, payload, "proj") == ("proj", "")
+
+
+def test_codex_exec_inside_a_codex_session_is_not_the_session(settings, tmp_path):
+    from aaw_core.hooks import owner
+
+    _mirror(settings, "proj", agent="codex", status="running", project_path=str(tmp_path))
+    exec_payload = {"session_id": "child-123456", "cwd": str(tmp_path),
+                    "transcript_path": _codex_rollout(tmp_path, "b", "codex_exec", "exec")}
+    project, why = owner.codex_session(settings, exec_payload, "proj")
+    assert project == "proj" and "codex exec conversation child-12" in why
+    # The app-server daemon reports the interactive agent as "vscode"; that is the session.
+    tui = {**exec_payload, "transcript_path": _codex_rollout(tmp_path, "c", "codex-tui", "vscode")}
+    assert owner.codex_session(settings, tui, "proj") == ("proj", "")
+    # A record that cannot be read counts as the session's own agent.
+    broken = tmp_path / "rollout-broken.jsonl"
+    broken.write_text("not json\n")
+    assert owner.codex_session(settings, {**exec_payload, "transcript_path": str(broken)}, "proj") == ("proj", "")
+
+
+def test_another_agent_under_a_codex_environment_is_ignored():
+    from aaw_core.hooks import owner
+
+    claude = {"session_id": "c1", "transcript_path": "/Users/me/.claude/projects/p/0b1e.jsonl"}
+    assert "another agent's conversation" in owner.foreign_agent(claude, "codex")
+    assert owner.foreign_agent(claude, "claude") == ""
+    assert owner.foreign_agent({"session_id": "c1"}, "codex") == ""
+    assert owner.foreign_agent({"transcript_path": "/x/rollout-1.jsonl"}, "codex") == ""
+
+
+def test_preamble_routes_a_codex_hook_to_the_session_of_its_folder(monkeypatch, settings, tmp_path):
+    monkeypatch.setenv("AAW_STATE_DIR", str(settings.state_dir))
+    settings.enabled_flag.parent.mkdir(parents=True, exist_ok=True)
+    settings.enabled_flag.write_text("")
+    _mirror(settings, "nested-repro", agent="codex", status="running", project_path=str(tmp_path))
+    monkeypatch.setenv("AAW_PROJECT", "x-codex")
+    monkeypatch.setenv("AAW_AGENT", "codex")
+    payload = {"session_id": "s1", "cwd": str(tmp_path), "transcript_path": _codex_rollout(tmp_path, "a")}
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    _, project, agent = common.preamble()
+    assert (project, agent) == ("nested-repro", "codex")
+    # codex exec from that session: silent, and logged.
+    payload["transcript_path"] = _codex_rollout(tmp_path, "b", "codex_exec", "exec")
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    with pytest.raises(SystemExit) as e:
+        common.preamble()
+    assert e.value.code == 0
+    assert "codex exec conversation" in (settings.logs_dir / "nested.log").read_text()
+    # A Codex hook with no environment at all still finds its session.
+    monkeypatch.delenv("AAW_PROJECT")
+    monkeypatch.delenv("AAW_AGENT")
+    payload["transcript_path"] = _codex_rollout(tmp_path, "a")
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    assert common.preamble()[1:] == ("nested-repro", "codex")
+
+
+def test_gemini_run_by_a_gemini_session_is_ignored(settings):
+    """2026-11-26, Gemini CLI 0.70: a session asked to run `gemini -p "..."` got the nested
+    answer in its feed, "Response ready" for it, and "Gemini session ended" while the real
+    session was still working. The layout seen: launcher 17930, its worker 19072 (fires the
+    session's hooks), the shell tool's two bash processes, then the nested gemini 20964."""
+    from aaw_core.hooks import owner
+
+    table = _table((74788, 1, "tmux"), (17928, 74788, "zsh"), (17930, 17928, "node"), (19072, 17930, "node"),
+                   (19910, 19072, "python3"),
+                   (20956, 19072, "/bin/bash"), (20963, 20956, "/bin/bash"), (20964, 20963, "node"),
+                   (21471, 20964, "python3"))
+
+    def nested(pid, session):
+        return owner.nested_agent(settings, "nested-gem", "gemini", {"session_id": session}, table=table, pid=pid)
+
+    assert nested(19910, "own") == ""
+    assert json.loads(owner.owner_file(settings, "nested-gem").read_text())["pid"] == 19072
+    assert "pid 20964 (node), session child" in nested(21471, "child")
+    assert nested(19910, "own") == ""
+
+
+def test_a_hook_orphaned_to_init_never_becomes_the_owner(settings):
+    """2026-11-26: Gemini's first hook ran after the process that started it had exited, so
+    its parent was pid 1. Init became the owner, and every later hook of the session, its own
+    approval question included, was dropped as "under owner pid 1"."""
+    from aaw_core.hooks import owner
+
+    table = _table((1, 0, "/sbin/launchd"), (300, 1, "python3"), (17930, 1, "node"), (19072, 17930, "node"),
+                   (19910, 19072, "python3"))
+    assert owner.nested_agent(settings, "g", "gemini", {"session_id": "s0"}, table=table, pid=300) == ""
+    assert not owner.owner_file(settings, "g").exists()
+    assert owner.nested_agent(settings, "g", "gemini", {"session_id": "s1"}, table=table, pid=19910) == ""
+    assert json.loads(owner.owner_file(settings, "g").read_text())["pid"] == 19072

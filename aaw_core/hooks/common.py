@@ -60,15 +60,22 @@ def preamble() -> tuple[Settings, str, str]:
     settings = load_settings()
     if not settings.enabled_flag.exists():
         sys.exit(0)
-    project = env_project()
-    if not project:
-        sys.exit(0)
-    agent = env_agent()
-    # An agent the session's agent started (a script running `claude -p`) inherits the
-    # project variable and is not the session: its hooks stay silent too.
+    project, agent = env_project(), env_agent()
     global _payload
     _payload = _read_stdin_payload()
-    nested = owner.nested_agent(settings, project, agent, _payload)
+    if owner.is_codex_hook(_payload, agent):
+        # Codex fires hooks from a daemon shared by all its sessions, with the first
+        # session's environment: the hook's own folder names the session (see owner.py).
+        agent = "codex"
+        project, nested = owner.codex_session(settings, _payload, project)
+        if not project:
+            sys.exit(0)
+    else:
+        if not project:
+            sys.exit(0)
+        # An agent the session's agent started (a script running `claude -p`) inherits the
+        # project variable and is not the session: its hooks stay silent too.
+        nested = owner.foreign_agent(_payload, agent) or owner.nested_agent(settings, project, agent, _payload)
     if nested:
         hook_log(settings, "nested", f"project={project!r} agent={agent} ignored {_hook_name()}: {nested}")
         sys.exit(0)
