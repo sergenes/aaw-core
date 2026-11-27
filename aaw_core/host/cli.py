@@ -772,8 +772,8 @@ def cmd_know(a, settings: Settings) -> None:
             knowledge.remove(settings, name)
             print(f"Removed {name}.")
             return
-        _propose(settings, peers, me, {"kind": "know_remove", "from": me, "agent": agent, "name": name})
-        print(f"Asked the user to approve removing {name}.")
+        ahead = _propose(settings, peers, me, {"kind": "know_remove", "from": me, "agent": agent, "name": name})
+        print(f"Asked the user to approve removing {name}.{_ahead(ahead)}")
         return
     # add
     body = (a.text or "").strip() or (sys.stdin.read().strip() if not sys.stdin.isatty() else "")
@@ -787,18 +787,29 @@ def cmd_know(a, settings: Settings) -> None:
         print(f"Saved {knowledge.write(settings, note)}")
         return
     from dataclasses import asdict
-    _propose(settings, peers, me, {"kind": "know_add", "from": me, "agent": agent, "note": asdict(note)})
-    print(f"Asked the user to approve the note {name}. It is saved only if they approve; carry on meanwhile.")
+    ahead = _propose(settings, peers, me, {"kind": "know_add", "from": me, "agent": agent, "note": asdict(note)})
+    print(f"Asked the user to approve the note {name}. It is saved only if they approve; "
+          f"carry on meanwhile.{_ahead(ahead)}")
 
 
-def _propose(settings: Settings, peers, me: str, request: dict) -> None:
+def _ahead(count: int) -> str:
+    if not count:
+        return ""
+    return (f" {count} proposal of yours is ahead of it" if count == 1
+            else f" {count} proposals of yours are ahead of it") + ": the user gets one card at a time."
+
+
+def _propose(settings: Settings, peers, me: str, request: dict) -> int:
+    """Queue a note proposal. Returns how many of this session's proposals are ahead of it."""
     if not settings.peers:
         die(peers.OFF_HINT)
     if not settings.relay_url or load_identity(settings) is None:
         die("this computer is not linked to a phone, so nobody can approve this")
-    if peers.pending_request(settings, me):
-        die("one proposal from this session is already waiting for the user. Wait for its outcome.")
+    ahead = peers.pending_count(settings, me)
+    if ahead >= peers.MAX_QUEUE:
+        die(f"{ahead} proposals from this session are already waiting for the user. Wait for their outcome.")
     peers.submit(settings, request)
+    return ahead
 
 
 def cmd_models(a, settings: Settings) -> None:
