@@ -152,8 +152,9 @@ The phone is the primary channel, and the computer itself also gets a banner whe
 
 Claude Code, Codex CLI, Gemini CLI, Grok CLI, Cursor, and [Scoot](https://github.com/sergenes/scootcli) (local models with Ollama, plus cloud models). Not affiliated with Anthropic, OpenAI, Google, xAI, Anysphere, or Ollama.
 
-scoot ships often, so `aaw status` says when PyPI has a newer one and prints the command that updates it.
+`aaw status` says when PyPI has a newer aaw-core, and a newer scoot (scoot ships often), and prints the command that updates each the way it was installed.
 It asks PyPI at most once a day and sends nothing but the package name; set `AAW_NO_UPDATE_CHECK=1` to switch the check off.
+The engine inside the Mac app is never offered an update here: the app replaces it when the app itself is updated.
 
 A scoot session on an `ollama/...` model needs Ollama running, so `aaw start` starts Ollama when it is installed and stopped, and says so when it is not installed or the model is not pulled.
 `aaw start-ollama` does the same on its own.

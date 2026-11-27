@@ -312,3 +312,14 @@ def test_status_offers_a_newer_scoot(tmp_path, monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out)["scoot_update"] is None
     assert cli.main(["status"]) == 0
     assert "is available" not in capsys.readouterr().out
+    # the engine's own update (0.1.27), with or without --agents
+    engine = {"installed": "0.1.26", "latest": "0.1.27", "command": sessions.ENGINE_INSTALLER}
+    monkeypatch.setattr(sessions, "engine_update", lambda settings: engine)
+    assert cli.main(["status", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["update"] == engine
+    assert cli.main(["status"]) == 0
+    assert ("Update: aaw-core 0.1.27 is available (installed: 0.1.26). "
+            "Update with: curl -fsSL https://agentsatwork.app/install-linux.sh | bash") in capsys.readouterr().out
+    monkeypatch.setattr(sessions, "engine_update", lambda settings: None)
+    assert cli.main(["status", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["update"] is None

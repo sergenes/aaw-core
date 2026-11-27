@@ -446,13 +446,18 @@ def scoot_installed_version() -> str:
 
 
 def scoot_latest_version(settings: Settings, now: float | None = None) -> str:
-    """The newest scootcli on PyPI, asked at most once a day and remembered in the state
-    dir. "" when it is not known (never asked, offline, or AAW_NO_UPDATE_CHECK is set):
-    the request carries nothing but the package name."""
+    """The newest scootcli on PyPI; see pypi_latest_version."""
+    return pypi_latest_version(settings, SCOOT_PYPI_URL, "scoot_latest.json", now)
+
+
+def pypi_latest_version(settings: Settings, url: str, cache_name: str, now: float | None = None) -> str:
+    """The newest release of one package on PyPI, asked at most once a day and remembered
+    in the state dir. "" when it is not known (never asked, offline, or
+    AAW_NO_UPDATE_CHECK is set): the request carries nothing but the package name."""
     if os.environ.get("AAW_NO_UPDATE_CHECK", "").strip() not in ("", "0"):
         return ""
     now = time.time() if now is None else now
-    cache = settings.state_dir / "scoot_latest.json"
+    cache = settings.state_dir / cache_name
     known, due = "", 0.0
     try:
         data = json.loads(cache.read_text())
@@ -463,7 +468,7 @@ def scoot_latest_version(settings: Settings, now: float | None = None) -> str:
         return known
     try:
         import urllib.request
-        with urllib.request.urlopen(SCOOT_PYPI_URL, timeout=SCOOT_CHECK_TIMEOUT_S) as resp:
+        with urllib.request.urlopen(url, timeout=SCOOT_CHECK_TIMEOUT_S) as resp:
             latest = str(json.loads(resp.read().decode("utf-8"))["info"]["version"])
     except Exception:  # noqa: BLE001  (offline, a proxy page, a changed answer: ask again in an hour)
         latest = ""
@@ -502,6 +507,44 @@ def scoot_update_command() -> str:
     if "python" in os.path.basename(python):
         return f"{python} -m pip install --upgrade scootcli"
     return "pip install --upgrade scootcli"
+
+
+ENGINE_PYPI_URL = "https://pypi.org/pypi/aaw-core/json"
+ENGINE_INSTALLER = "curl -fsSL https://agentsatwork.app/install-linux.sh | bash"
+ENGINE_INSTALLER_VENV = os.path.join("aaw-core", "venv")  # scripts/install.sh: <data dir>/aaw-core/venv
+MAC_APP_PYTHON = Path("Library") / "Application Support" / "AgentBridge" / "python"
+
+
+def engine_update_command(prefix: str | None = None) -> str:
+    """How this engine was installed decides how it is updated: the one-line installer
+    (its own venv), pipx, or pip in the Python environment that holds it. "" for the
+    engine inside the Mac app, which the app replaces when the app itself is updated."""
+    prefix = os.path.realpath(prefix or sys.prefix)
+    home = os.path.realpath(Path.home())
+    if prefix == os.path.join(home, MAC_APP_PYTHON) or prefix.startswith(os.path.join(home, MAC_APP_PYTHON) + os.sep):
+        return ""
+    if prefix.endswith(os.sep + ENGINE_INSTALLER_VENV):
+        return ENGINE_INSTALLER
+    if "/pipx/" in prefix:
+        return "pipx upgrade aaw-core"
+    return f"{sys.executable} -m pip install --upgrade aaw-core"
+
+
+def engine_update(settings: Settings, installed: str | None = None) -> dict[str, str] | None:
+    """{"installed", "latest", "command"} when PyPI has a newer aaw-core than the one
+    running, else None: up to date, a dev build, the latest not known, or the engine
+    inside the Mac app (the app says so itself when a newer app is out)."""
+    if installed is None:
+        from aaw_core import __version__ as installed
+    have = version_tuple(installed)
+    command = engine_update_command()
+    if have is None or not command:
+        return None
+    latest = pypi_latest_version(settings, ENGINE_PYPI_URL, "engine_latest.json")
+    newest = version_tuple(latest)
+    if newest is None or newest <= have:
+        return None
+    return {"installed": installed, "latest": latest, "command": command}
 
 
 def scoot_update(settings: Settings) -> dict[str, str] | None:

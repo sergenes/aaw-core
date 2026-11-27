@@ -351,6 +351,9 @@ def status_snapshot(settings: Settings) -> dict:
 def cmd_status(a, settings: Settings) -> None:
     if a.json:
         snap = status_snapshot(settings)
+        # A newer aaw-core on PyPI (0.1.27): {installed, latest, command}, else null. Never
+        # set for the engine inside the Mac app, which the app updates.
+        snap["update"] = sessions.engine_update(settings)
         if a.agents:
             snap["detected_agents"] = hooks_installer.detected_agents()
             scoot = sessions.scoot_status()
@@ -377,6 +380,10 @@ def cmd_status(a, settings: Settings) -> None:
           + (FOCUS_HINT if settings.local_notifications and sys.platform == "darwin" else ""))
     print(f"Linked: {'yes, computer ' + ident.computer_id[:8] + '...' if ident else 'no (aaw link)'}; "
           f"session key: {'yes' if settings.session_key_file.exists() else 'no'}")
+    engine = sessions.engine_update(settings)
+    if engine:
+        print(f"Update: aaw-core {engine['latest']} is available (installed: {engine['installed']}). "
+              f"Update with: {engine['command']}")
     scoot = sessions.scoot_status()
     if scoot is not None:
         print(f"Scoot: {len(scoot[0])} models available (aaw models)")
