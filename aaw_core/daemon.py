@@ -34,6 +34,8 @@ from aaw_core.hooks.common import (
     tmux_session,
 )
 from aaw_core.hooks.on_stop_cursor import response_from_transcript as cursor_response_from_transcript
+from aaw_core.hooks.on_stop_cursor import session_id_of as cursor_session_id_of
+from aaw_core.hooks.on_stop_cursor import session_model as cursor_session_model
 from aaw_core.hooks.on_subagent import reconcile_subagents, update_subagents
 from aaw_core.host import detect, tmux, usage
 from aaw_core.host.identity import load_identity
@@ -524,6 +526,7 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
     cursor_idle_since: float | None = None
     cursor_idle_written = False
     cursor_resp_check_at = 0.0
+    cursor_model: str | None = None  # the model last published for this session, None before the first look
 
     def auto_approve() -> bool:
         return bool(project_doc(transport).get("auto_approve"))
@@ -857,6 +860,16 @@ def run_session(settings: Settings, project_dir: Path, agent: str = "claude", pr
                                                                           "agent": "cursor"})
                                         log(f"Cursor response captured via the idle fallback ({len(response)} chars)")
                                         return_owed_answer(settings, project_id, "cursor", response)
+                                    # The model sits in the session's own store; no hook is
+                                    # needed, and a /model switch shows at the next idle prompt.
+                                    model = cursor_session_model(cursor_session_id_of(t_path or ""))
+                                    # "" is published only at the first look (it clears a label
+                                    # left by an earlier session), never over a known model: a
+                                    # store Cursor is writing can fail to open for one tick.
+                                    if model != cursor_model and (model or cursor_model is None):
+                                        transport.update_project(model=model)
+                                        cursor_model = model
+                                        log(f"Cursor model: {model or 'unknown'}")
                                 except Exception as e:  # noqa: BLE001
                                     log(f"Cursor fallback capture failed: {e}", err=True)
                     elif pane.strip():

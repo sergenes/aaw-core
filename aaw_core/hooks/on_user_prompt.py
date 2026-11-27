@@ -11,7 +11,7 @@ import re
 import sys
 
 from aaw_core.hooks.common import open_transport, preamble, read_payload
-from aaw_core.hooks.on_stop_claude import model_from_hook
+from aaw_core.hooks.on_stop_claude import active_model, model_from_hook
 
 # Claude Code fires UserPromptSubmit for its own synthetic turns too, e.g. a finished
 # background task wrapped in <task-notification>, and a subagent's report wrapped
@@ -54,7 +54,10 @@ def main() -> int:
     # shows the model on a running session, and a /model switch at the next prompt rather
     # than after a long turn. Only the input counts here: the transcript's turn record may
     # not be written yet, so reading it now could show the previous model.
+    # Grok names none in the input; its session summary holds the current one.
     model = model_from_hook(payload) if agent in ("claude", "codex") else ""
+    if agent == "grok":
+        model = active_model(payload, agent)
     if text or model:
         transport = open_transport(settings, project)
         if transport is not None:
