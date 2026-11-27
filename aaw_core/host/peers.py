@@ -36,6 +36,8 @@ SETTLE_S = 3.0  # after the turn ends the daemon writes "idle" once; ask after t
 CARD_CHECK_S = 3.0  # how often the worker looks whether its card is still the session's pending one
 ANSWER_WAIT_S = 2 * 3600  # an answer that takes longer is dropped
 GUEST_RETRIES = 3
+MAX_QUEUE = 10  # proposals one session may have waiting; the user answers them one card at a time
+QUEUE_CHECK_S = 2.0  # how often a queued worker looks whether its turn has come
 SEND, DONT_SEND = "Send", "Don't send"
 SAVE, DONT_SAVE = "Save", "Don't save"
 REMOVE, KEEP = "Remove", "Keep"
@@ -126,21 +128,89 @@ def _own_dir(path: Path) -> bool:
     return stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid() and not st.st_mode & 0o022
 
 
-def pending_request(settings: Settings, project: str) -> bool:
-    """Whether this session already has a proposal waiting for the user."""
-    limit = time.time() - (TURN_WAIT_S + ASK_TIMEOUT_S * (GUEST_RETRIES + 1) + 60)
-    box = outbox(settings)
-    waiting = [*_dir(settings, "requests").glob("*.json"), *(box.glob("*.json") if _own_dir(box) else [])]
-    for f in waiting:
+def _stale_before() -> float:
+    """A request file not touched since then belongs to a worker that died: one card lives
+    at most this long, and a worker that waits its turn keeps touching its file."""
+    return time.time() - (TURN_WAIT_S + ASK_TIMEOUT_S * (GUEST_RETRIES + 1) + 60)
+
+
+def _waiting(settings: Settings, project: str, folders: list[Path]) -> list[tuple[float, str, Path]]:
+    """This session's requests in the given folders, oldest first. A dead worker's
+    leftover is removed on the way, so it cannot block the session for good."""
+    limit, found = _stale_before(), []
+    for f in (f for folder in folders for f in folder.glob("*.json")):
         try:
             if f.stat().st_mtime < limit:
-                f.unlink(missing_ok=True)  # a worker that died: do not block the session for good
+                f.unlink(missing_ok=True)
                 continue
-            if json.loads(f.read_text()).get("from") == project:
-                return True
-        except (OSError, ValueError):
+            request = json.loads(f.read_text())
+            if request.get("from") == project:
+                found.append((float(request.get("ts") or 0), f.name, f))
+        except (OSError, ValueError, TypeError):
             continue
-    return False
+    return sorted(found)
+
+
+def pending_count(settings: Settings, project: str) -> int:
+    """How many proposals of this session wait for the user, asked or queued."""
+    box = outbox(settings)
+    return len(_waiting(settings, project, [_dir(settings, "requests"), *([box] if _own_dir(box) else [])]))
+
+
+def pending_request(settings: Settings, project: str) -> bool:
+    """Whether this session already has a proposal waiting for the user."""
+    return pending_count(settings, project) > 0
+
+
+# A session has one pending question, so its proposals are asked one card at a time: each
+# has its own worker, and a worker asks only while it holds the session's lock.
+
+
+def _lock_path(settings: Settings, project: str) -> Path:
+    folder = _dir(settings, "requests")
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / f"{hashlib.sha256(project.encode()).hexdigest()[:16]}.lock"
+
+
+def _lock_holder_alive(lock: Path) -> bool:
+    try:
+        os.kill(int(lock.read_text().strip()), 0)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def my_turn(settings: Settings, path: Path, project: str) -> bool:
+    """Take the session's lock if this request is the oldest one waiting. True means the
+    caller asks now and calls release_turn() afterwards."""
+    lock = _lock_path(settings, project)
+    if lock.exists() and not _lock_holder_alive(lock):
+        lock.unlink(missing_ok=True)
+    waiting = _waiting(settings, project, [_dir(settings, "requests")])
+    if waiting and waiting[0][2] != path:
+        return False
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w") as f:
+        f.write(str(os.getpid()))
+    return True
+
+
+def release_turn(settings: Settings, project: str) -> None:
+    _lock_path(settings, project).unlink(missing_ok=True)
+
+
+def wait_my_turn(settings: Settings, path: Path, project: str) -> None:
+    """Block until this request may be asked. The file is touched on every look, which is
+    what tells a queued request from a dead worker's leftover."""
+    while not my_turn(settings, path, project):
+        try:
+            os.utime(path)
+        except OSError:
+            pass
+        time.sleep(QUEUE_CHECK_S)
 
 
 def submit(settings: Settings, request: dict) -> Path:
@@ -426,12 +496,15 @@ def main(argv: list[str] | None = None) -> int:
         _log(settings, f"unreadable request {path.name}: {e}")
         return 1
     from aaw_core.hooks.common import open_transport
+    sender = str(request.get("from") or "")
     try:
+        wait_my_turn(settings, path, sender)
         result = run_request(settings, request, open_transport)
     except Exception as e:  # noqa: BLE001 - the log is the only place a worker can say what went wrong
         result = f"failed: {e}"
     finally:
         path.unlink(missing_ok=True)
+        release_turn(settings, sender)
     _log(settings, f"{request.get('kind')} from {request.get('from')}: {result}")
     return 0
 

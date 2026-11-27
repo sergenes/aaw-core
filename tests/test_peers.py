@@ -526,3 +526,90 @@ def test_groks_shell_tool_is_a_shell_tool(settings, monkeypatch):
         "tool_name": "run_terminal_command", "tool_input": {"command": 'aaw tell x-claude "pong?"'}})
     assert (out, code) == on_pre_tool.approve_output("grok")
 
+
+
+# ── several proposals from one session ───────────────────────────────────────
+
+
+def _note_request(name: str, ts: float) -> dict:
+    return {"kind": "know_add", "from": "bridge", "agent": "claude", "ts": ts,
+            "note": {"name": name, "title": name, "description": "", "added": "", "body": "x"}}
+
+
+def test_an_agent_can_propose_several_notes_and_is_told_how_many_wait(home, monkeypatch, capsys):
+    """Seen 2026-11-23: seven prepared notes needed seven turns, because the second
+    `aaw know add` was refused while the first card waited."""
+    from aaw_core.host import cli
+    monkeypatch.setenv("AAW_PEERS", "1")
+    monkeypatch.setattr(peers, "start_worker", lambda settings, path: None)
+    _in_session(monkeypatch)
+    assert cli.main(["know", "add", "one", "--text", "first"]) == 0
+    assert "ahead of it" not in capsys.readouterr().out
+    assert cli.main(["know", "add", "two", "--text", "second"]) == 0
+    assert "1 proposal of yours is ahead of it" in capsys.readouterr().out
+    monkeypatch.setattr(peers, "MAX_QUEUE", 2)
+    assert "2 proposals from this session are already waiting" in _fails(["know", "add", "three", "--text", "x"], capsys)
+    # A message to another agent ends the turn and waits for an answer: still one at a time.
+    monkeypatch.setattr(peers, "others", lambda settings, me="": [
+        {"id": "bridge", "agent": "claude", "me": True}, {"id": "scootcli", "agent": "scoot", "me": False}])
+    assert "already waiting" in _fails(["tell", "scootcli", "hi"], capsys)
+
+
+def test_queued_proposals_reach_the_user_one_card_at_a_time_in_order(settings, monkeypatch):
+    """Each proposal has its own worker, and a session has one pending question: a second
+    card sent while the first waits would replace it on the phone."""
+    monkeypatch.setattr(peers, "QUEUE_CHECK_S", 0.01)
+    folder = settings.state_dir / "peer" / "requests"
+    folder.mkdir(parents=True)
+    first, second = folder / "b.json", folder / "a.json"  # the file names do not decide the order
+    first.write_text(json.dumps(_note_request("one", 100.0)))
+    second.write_text(json.dumps(_note_request("two", 200.0)))
+    assert peers.pending_count(settings, "bridge") == 2 and peers.pending_count(settings, "other") == 0
+
+    assert not peers.my_turn(settings, second, "bridge")  # the older one goes first
+    assert peers.my_turn(settings, first, "bridge")       # and takes the session's lock
+    assert not peers.my_turn(settings, second, "bridge")  # nothing else while it is asked
+    peers.release_turn(settings, "bridge")
+    first.unlink()
+    assert peers.my_turn(settings, second, "bridge")
+    peers.release_turn(settings, "bridge")
+
+
+def test_a_worker_that_died_does_not_hold_the_queue(settings, monkeypatch):
+    import os
+    folder = settings.state_dir / "peer" / "requests"
+    folder.mkdir(parents=True)
+    dead, mine = folder / "dead.json", folder / "mine.json"
+    dead.write_text(json.dumps(_note_request("one", 100.0)))
+    mine.write_text(json.dumps(_note_request("two", 200.0)))
+    # Its lock names a process that is gone, and its request file was last touched long ago.
+    peers._lock_path(settings, "bridge").write_text("999999999")
+    old = time.time() - 4 * 3600
+    os.utime(dead, (old, old))
+    assert peers.my_turn(settings, mine, "bridge")
+    assert not dead.exists()
+    peers.release_turn(settings, "bridge")
+    assert not peers._lock_path(settings, "bridge").exists()
+
+
+def test_a_waiting_worker_keeps_its_request_fresh(settings, monkeypatch):
+    """A request that waits behind others for longer than one card's lifetime must not be
+    taken for a dead worker's leftover."""
+    import os
+    monkeypatch.setattr(peers, "QUEUE_CHECK_S", 0.01)
+    folder = settings.state_dir / "peer" / "requests"
+    folder.mkdir(parents=True)
+    head, mine = folder / "head.json", folder / "mine.json"
+    head.write_text(json.dumps(_note_request("one", 100.0)))
+    mine.write_text(json.dumps(_note_request("two", 200.0)))
+    aged = time.time() - 1000
+    os.utime(mine, (aged, aged))
+    looks = []
+
+    def my_turn(settings, path, project):
+        looks.append(path.stat().st_mtime)
+        return len(looks) >= 3
+
+    monkeypatch.setattr(peers, "my_turn", my_turn)
+    peers.wait_my_turn(settings, mine, "bridge")
+    assert len(looks) == 3 and mine.stat().st_mtime > aged + 900
