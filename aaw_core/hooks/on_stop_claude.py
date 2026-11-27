@@ -56,6 +56,7 @@ def pane_raw(session: str) -> str:
 # ── transcript ──────────────────────────────────────────────────────────────
 
 
+MODEL_AGENTS = ("claude", "codex", "gemini", "grok", "cursor")  # scoot publishes its own at start
 MODEL_BLOCK_BYTES = 256 * 1024  # the backward scan's step
 MODEL_SCAN_BYTES = 64 * 1024 * 1024  # how far back a transcript is searched for its model
 
@@ -103,13 +104,16 @@ def _model_in_entry(entry: dict, agent: str) -> str:
             return ""
         settings = payload.get("thread_settings")
         return _usable_model(payload.get("model") or (settings.get("model") if isinstance(settings, dict) else None))
+    if agent == "gemini":  # each answer names the model that wrote it, also when the CLI is on Auto
+        return _usable_model(entry.get("model")) if entry.get("type") == "gemini" else ""
     msg = entry.get("message") or {}
     return _usable_model(msg.get("model")) if isinstance(msg, dict) and msg.get("role") == "assistant" else ""
 
 
 def model_from_transcript(path_str: str, agent: str = "claude") -> str:
     """The newest model the agent's own transcript records, or "" when it names none.
-    Claude's assistant entries carry message.model; a Codex rollout records the model once
+    Claude's assistant entries carry message.model, and Gemini's answers ("type": "gemini")
+    a model of their own; a Codex rollout records the model once
     per turn (turn_context, and thread_settings_applied at start), so one long Codex turn
     leaves it megabytes from the end. The file is read backwards in fixed blocks, a line
     that spans two blocks kept whole, and the scan stops at the newest record: never the
@@ -149,8 +153,16 @@ def model_from_transcript(path_str: str, agent: str = "claude") -> str:
 
 
 def active_model(payload: dict, agent: str) -> str:
-    """The model to show for this session: the hook input's, else the transcript's
-    newest, else "" (unknown: never a guess from the agent's config defaults)."""
+    """The model to show for this session: the hook input's, else the newest one the
+    agent's own record of the session names, else "" (unknown: never a guess from the
+    agent's config defaults). Claude, Codex and Gemini record it in the transcript, Grok
+    in the session's summary, Cursor in the session's store."""
+    if agent == "grok":
+        from aaw_core.hooks import on_stop_grok
+        return on_stop_grok.session_model(payload)
+    if agent == "cursor":
+        from aaw_core.hooks import on_stop_cursor
+        return on_stop_cursor.model_for(payload)
     return model_from_hook(payload) or model_from_transcript(str(payload.get("transcript_path") or ""), agent)
 
 

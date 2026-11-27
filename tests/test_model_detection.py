@@ -11,7 +11,7 @@ import json
 import pytest
 
 from aaw_core.config import Settings
-from aaw_core.hooks import on_session_start, on_stop_claude, on_user_prompt
+from aaw_core.hooks import on_session_start, on_stop_claude, on_stop_cursor, on_stop_grok, on_user_prompt
 from aaw_core.host import hooks_installer as hi
 
 
@@ -156,6 +156,123 @@ def test_a_new_session_is_stamped_from_the_hook_input_else_left_unknown(settings
                 {"source": "resume", "transcript_path": resumed}).updates == [{"model": "gpt-6-sol"}]
     assert _run(on_session_start, monkeypatch, settings, "codex",
                 {"source": "fork", "model": "gpt-6-astra"}).updates == [{"model": "gpt-6-astra"}]
+
+
+def test_gemini_names_the_model_in_each_answer_of_its_transcript(tmp_path):
+    """Gemini CLI 0.71: the hook input names no model, and the footer can say "Auto"; each
+    answer in the session's JSONL names the model that wrote it. Shaped like a real file."""
+    lines = [
+        {"sessionId": "s", "projectHash": "h", "kind": "main"},
+        {"id": "1", "type": "user", "content": [{"text": 'the "model" is not named here'}]},
+        {"$set": {"lastUpdated": "2026-11-27T04:56:01.808Z"}},
+        {"id": "2", "type": "gemini", "content": "", "thoughts": [], "tokens": {"total": 1}},  # still thinking
+        {"id": "3", "type": "gemini", "content": "PONG", "tokens": {"total": 2}, "model": "gemini-3.8-flash"},
+        {"id": "4", "type": "user", "content": [{"text": "again"}], "model": "not-this"},
+        {"$set": {"lastUpdated": "2026-11-27T04:56:19.252Z"}},
+    ]
+    path = _write(tmp_path / "session.jsonl", [json.dumps(e) for e in lines])
+    assert on_stop_claude.active_model({"transcript_path": path, "hook_event_name": "AfterAgent"}, "gemini") == "gemini-3.8-flash"
+    switched = lines + [{"id": "5", "type": "gemini", "content": "ok", "model": "gemini-3.8-pro"}]
+    path = _write(tmp_path / "session.jsonl", [json.dumps(e) for e in switched])
+    assert on_stop_claude.active_model({"transcript_path": path}, "gemini") == "gemini-3.8-pro"
+    assert on_stop_claude.active_model({"transcript_path": str(tmp_path / "none.jsonl")}, "gemini") == ""
+
+
+def _grok_session(home, monkeypatch, summary: dict | None) -> dict:
+    """A Grok session folder under a fake home, and the hook input that names it."""
+    monkeypatch.setattr(on_stop_grok.Path, "home", lambda: home)
+    for name in ("GROK_SESSION_ID", "GROK_WORKSPACE_ROOT"):
+        monkeypatch.delenv(name, raising=False)
+    folder = home / ".grok" / "sessions" / "%2Fw%2Fmy%20proj" / "sid"
+    folder.mkdir(parents=True, exist_ok=True)
+    if summary is not None:
+        (folder / "summary.json").write_text(json.dumps(summary))
+    return {"sessionId": "sid", "workspaceRoot": "/w/my proj/", "cwd": "/w/my proj"}
+
+
+def test_grok_names_the_model_in_its_session_summary(tmp_path, monkeypatch):
+    """Grok 1.0.92: no model in the hook input; summary.json holds `current_model_id`."""
+    payload = _grok_session(tmp_path, monkeypatch, {"current_model_id": "grok-4.7", "reasoning_effort": "high"})
+    assert on_stop_claude.active_model(payload, "grok") == "grok-4.7"
+    assert on_stop_claude.active_model({"sessionId": "other", "cwd": "/w/my proj"}, "grok") == ""  # no such session
+    assert on_stop_claude.active_model({}, "grok") == ""
+    monkeypatch.setenv("GROK_SESSION_ID", "sid")  # the hook's environment names the session too
+    monkeypatch.setenv("GROK_WORKSPACE_ROOT", "/w/my proj")
+    assert on_stop_claude.active_model({}, "grok") == "grok-4.7"
+
+
+def test_a_grok_summary_without_a_model_is_unknown(tmp_path, monkeypatch):
+    payload = _grok_session(tmp_path, monkeypatch, None)
+    assert on_stop_grok.session_model(payload) == ""  # a session that has not answered yet
+    for summary in ('{"current_model_id": null}', '{"current_model_id": 7}', "[]", "{not json"):
+        (tmp_path / ".grok" / "sessions" / "%2Fw%2Fmy%20proj" / "sid" / "summary.json").write_text(summary)
+        assert on_stop_grok.session_model(payload) == "", summary
+
+
+def test_grok_is_stamped_at_start_and_at_each_prompt(settings, tmp_path, monkeypatch):
+    payload = _grok_session(tmp_path, monkeypatch, None)
+    # a fresh session has no summary yet: the label an earlier session left is cleared
+    assert _run(on_session_start, monkeypatch, settings, "grok", {**payload, "source": "new"}).updates == [{"model": ""}]
+    _grok_session(tmp_path, monkeypatch, {"current_model_id": "grok-4.6"})
+    assert _run(on_session_start, monkeypatch, settings, "grok",
+                {**payload, "source": "resume"}).updates == [{"model": "grok-4.6"}]
+    t = _run(on_user_prompt, monkeypatch, settings, "grok", {**payload, "prompt": "<user_query>go</user_query>"})
+    assert t.updates == [{"model": "grok-4.6"}]
+    assert t.events == [("message", {"role": "user", "content": "go", "agent": "grok"})]
+
+
+def _cursor_store(home, session_id: str, meta, *, as_hex: bool = True):
+    """A Cursor session store shaped like 2026.11.19's: one `meta` row, JSON as hex text."""
+    import sqlite3
+    folder = home / ".cursor" / "chats" / "3fa251e03e529ca2721a2a3e20383a16" / session_id
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "store.db").unlink(missing_ok=True)
+    conn = sqlite3.connect(folder / "store.db")
+    conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute("CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB)")
+    text = meta if isinstance(meta, str) else json.dumps(meta)
+    conn.execute("INSERT INTO meta VALUES ('0', ?)", (text.encode().hex() if as_hex else text,))
+    conn.commit()
+    conn.close()
+
+
+def test_cursor_names_the_model_in_its_session_store(tmp_path, monkeypatch):
+    """Cursor's transcript names no model and its hooks can stay silent; the session's own
+    store records `lastUsedModel`, "default" when Cursor picks (its screen says "Auto")."""
+    monkeypatch.setattr(on_stop_cursor.Path, "home", lambda: tmp_path)
+    _cursor_store(tmp_path, "sid-1", {"agentId": "sid-1", "mode": "default", "lastUsedModel": "grok-4.6"})
+    assert on_stop_cursor.session_model("sid-1") == "grok-4.6"
+    _cursor_store(tmp_path, "sid-1", {"agentId": "sid-1", "lastUsedModel": "default"})
+    assert on_stop_cursor.session_model("sid-1") == "Auto"
+    _cursor_store(tmp_path, "sid-1", {"lastUsedModel": "gpt-6-astra"}, as_hex=False)  # plain JSON reads too
+    assert on_stop_cursor.session_model("sid-1") == "gpt-6-astra"
+    for meta in ({"agentId": "sid-1"}, {"lastUsedModel": None}, {"lastUsedModel": {"id": "x"}}, [], "zz not json"):
+        _cursor_store(tmp_path, "sid-1", meta)
+        assert on_stop_cursor.session_model("sid-1") == "", meta
+    assert on_stop_cursor.session_model("no-such-session") == ""
+    assert on_stop_cursor.session_model("") == ""
+    assert on_stop_cursor.session_model("../sid-1") == ""  # never a path
+
+
+def test_a_cursor_store_that_is_not_a_database_is_unknown(tmp_path, monkeypatch):
+    monkeypatch.setattr(on_stop_cursor.Path, "home", lambda: tmp_path)
+    folder = tmp_path / ".cursor" / "chats" / "h" / "sid-2"
+    folder.mkdir(parents=True)
+    (folder / "store.db").write_text("not sqlite")
+    assert on_stop_cursor.session_model("sid-2") == ""
+
+
+def test_a_cursor_hook_finds_its_session_by_the_transcript_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(on_stop_cursor.Path, "home", lambda: tmp_path)
+    _cursor_store(tmp_path, "sid-3", {"lastUsedModel": "default"})
+    transcript = "/x/.cursor/projects/w/agent-transcripts/sid-3/sid-3.jsonl"
+    assert on_stop_cursor.session_id_of(transcript) == "sid-3"
+    assert on_stop_claude.active_model({"transcript_path": transcript}, "cursor") == "Auto"
+    assert on_stop_claude.active_model({"conversation_id": "sid-3"}, "cursor") == "Auto"
+    # no store for the session: what the hook input names, in the same words
+    assert on_stop_claude.active_model({"conversation_id": "gone", "model": "default"}, "cursor") == "Auto"
+    assert on_stop_claude.active_model({"conversation_id": "gone", "model": "gpt-6-sol"}, "cursor") == "gpt-6-sol"
+    assert on_stop_claude.active_model({}, "cursor") == ""
 
 
 def test_codex_hook_entries_keep_their_trust(home):
