@@ -125,14 +125,36 @@ def response_from_grok_pane(lines: list[str]) -> str:
     return "\n".join(ln for ln in text.split("\n") if ln.strip()).strip()
 
 
-def response_from_chat_history(payload: dict, settings: Settings) -> str:
-    """The completed assistant response from Grok's own chat_history.jsonl."""
+def session_dir(payload: dict) -> Path | None:
+    """Where Grok keeps this session's files (~/.grok/sessions/{cwd}/{session id}), None
+    when the hook names no session or folder."""
     session_id = os.environ.get("GROK_SESSION_ID") or payload.get("sessionId", "")
     workspace = os.environ.get("GROK_WORKSPACE_ROOT") or payload.get("workspaceRoot", "") or payload.get("cwd", "")
     if not session_id or not workspace:
+        return None
+    return Path.home() / ".grok" / "sessions" / urllib.parse.quote(workspace.rstrip("/"), safe="") / session_id
+
+
+def session_model(payload: dict) -> str:
+    """The model this Grok session answers with: `current_model_id` in the session's own
+    summary.json, which follows a /model switch. Grok's hook input names no model. "" when
+    the summary is not written yet (a session that has not answered) or names none."""
+    folder = session_dir(payload)
+    if folder is None:
         return ""
-    encoded_cwd = urllib.parse.quote(workspace.rstrip("/"), safe="")
-    chat_path = Path.home() / ".grok" / "sessions" / encoded_cwd / session_id / "chat_history.jsonl"
+    try:
+        model = json.loads((folder / "summary.json").read_text(encoding="utf-8")).get("current_model_id")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    return model.strip() if isinstance(model, str) else ""
+
+
+def response_from_chat_history(payload: dict, settings: Settings) -> str:
+    """The completed assistant response from Grok's own chat_history.jsonl."""
+    folder = session_dir(payload)
+    if folder is None:
+        return ""
+    chat_path = folder / "chat_history.jsonl"
     if not chat_path.exists():
         hook_log(settings, "on_stop", f"grok chat_history not found: {chat_path}")
         return ""

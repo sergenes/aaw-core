@@ -93,9 +93,9 @@ def main() -> int:
                             transport.write_event("reminder", {"reset_at": reset_unix, "reset_label": reset_label,
                                                                "agent": agent})
                 transport.set_project_status("stopped" if is_final_stop else "idle", pending_question_id="")
-                if agent in ("claude", "codex"):
-                    # The phone shows the model next to the agent; the transcript is the
-                    # truth after a /model switch, which no hook announces.
+                if agent in on_stop_claude.MODEL_AGENTS:
+                    # The phone shows the model next to the agent; the agent's own record
+                    # is the truth after a /model switch, which no hook announces.
                     model = on_stop_claude.active_model(payload, agent)
                     if model:
                         transport.update_project(model=model)
