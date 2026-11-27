@@ -115,13 +115,14 @@ def test_list_sessions_counts_any_number_of_windows_as_attached(monkeypatch):
 class _PyPI:
     """urlopen stand-in that answers with a version and counts the calls."""
 
-    def __init__(self, version="0.16.0", fail=False):
+    def __init__(self, version="0.16.0", fail=False, url=None):
         self.version, self.fail, self.calls = version, fail, 0
+        self.url = url or sessions.SCOOT_PYPI_URL
 
     def __call__(self, url, timeout=None):
         import io
         self.calls += 1
-        assert url == sessions.SCOOT_PYPI_URL
+        assert url == self.url
         if self.fail:
             raise OSError("offline")
         return io.BytesIO(json.dumps({"info": {"version": self.version}}).encode())
@@ -152,6 +153,45 @@ def test_scoot_update_is_offered_when_pypi_has_a_newer_one(tmp_path, monkeypatch
         _scoot_on_path(monkeypatch, tmp_path, version)
         assert sessions.scoot_update(settings) is None, version
     assert pypi.calls == 1
+
+
+def test_the_engine_offers_its_own_update_with_the_command_for_its_install(tmp_path, monkeypatch, settings):
+    """Nothing told a Linux user that aaw-core had a new release (the Mac app and the
+    phones learn it from the site). `aaw status` says so, from PyPI, once a day."""
+    import urllib.request
+    monkeypatch.delenv("AAW_NO_UPDATE_CHECK")
+    pypi = _PyPI("0.1.27", url=sessions.ENGINE_PYPI_URL)
+    monkeypatch.setattr(urllib.request, "urlopen", pypi)
+    monkeypatch.setattr(sessions.Path, "home", lambda: tmp_path)
+    venv = tmp_path / ".local" / "share" / "aaw-core" / "venv"
+    venv.mkdir(parents=True)
+    monkeypatch.setattr(sessions.sys, "prefix", str(venv))
+    assert sessions.engine_update(settings, "0.1.26") == {
+        "installed": "0.1.26", "latest": "0.1.27", "command": sessions.ENGINE_INSTALLER}
+    assert sessions.engine_update(settings, "0.1.26") is not None and pypi.calls == 1  # remembered for a day
+    assert (settings.state_dir / "engine_latest.json").exists()
+    assert not (settings.state_dir / "scoot_latest.json").exists()  # each package keeps its own answer
+    for version in ("0.1.27", "0.2.0", "0.1.27.dev1", ""):  # current, ahead (a checkout), a dev build
+        assert sessions.engine_update(settings, version) is None, version
+    assert pypi.calls == 1
+
+
+def test_the_engine_update_command_follows_how_it_was_installed(tmp_path, monkeypatch, settings):
+    import urllib.request
+    monkeypatch.setattr(sessions.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(sessions.sys, "executable", "/opt/py/bin/python3")
+    assert sessions.engine_update_command("/data/aaw-core/venv") == sessions.ENGINE_INSTALLER  # XDG_DATA_HOME
+    assert sessions.engine_update_command("/home/u/.local/pipx/venvs/aaw-core") == "pipx upgrade aaw-core"
+    assert sessions.engine_update_command("/opt/py") == "/opt/py/bin/python3 -m pip install --upgrade aaw-core"
+    # inside the Mac app the app replaces the engine: no offer, and PyPI is never asked
+    mac = tmp_path / "Library" / "Application Support" / "AgentBridge" / "python"
+    mac.mkdir(parents=True)
+    assert sessions.engine_update_command(str(mac)) == ""
+    monkeypatch.delenv("AAW_NO_UPDATE_CHECK")
+    pypi = _PyPI("9.9.9", url=sessions.ENGINE_PYPI_URL)
+    monkeypatch.setattr(urllib.request, "urlopen", pypi)
+    monkeypatch.setattr(sessions.sys, "prefix", str(mac))
+    assert sessions.engine_update(settings, "0.1.26") is None and pypi.calls == 0
 
 
 def test_scoot_update_stays_quiet_offline_and_when_switched_off(tmp_path, monkeypatch, settings):
